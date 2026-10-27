@@ -81,7 +81,8 @@ internal static class Rm2kFiles
         try
         {
             int width = BitConverter.ToUInt16(bytes, 4), height = BitConverter.ToUInt16(bytes, 6);
-            if (width == 0 || height == 0) return null;
+            // 2000/2003 pictures are small; refuse sizes that would only come from a damaged file.
+            if (width == 0 || height == 0 || (long)width * height > 4096 * 4096) return null;
             using var input = new MemoryStream(bytes, 8, bytes.Length - 8, writable: false);
             using var zlib = new ZLibStream(input, CompressionMode.Decompress);
             var raw = new byte[768 + width * height];

@@ -407,9 +407,11 @@ internal sealed class MainForm : Form
         _releaseError = null;
         _releaseTotal = dates.Count;
         _releaseProgress = 0;
+        // A cancelled run may still be unwinding; make sure it stops before this one starts.
+        _releaseCts?.Cancel();
         _releaseCts?.Dispose();
-        _releaseCts = new CancellationTokenSource();
-        var token = _releaseCts.Token;
+        var cts = _releaseCts = new CancellationTokenSource();
+        var token = cts.Token;
         ShowReleaseDays();
 
         int consecutiveFailures = 0;
@@ -450,10 +452,12 @@ internal sealed class MainForm : Form
         }
         catch (OperationCanceledException)
         {
-            _releasesFetching = false;
+            // A newer run may have started since; it owns the flag.
+            if (_releaseCts == cts) _releasesFetching = false;
             return;
         }
 
+        if (_releaseCts != cts) return;
         _releasesFetching = false;
         if (IsDisposed) return;
         await Task.Run(() =>
@@ -885,10 +889,13 @@ internal sealed class MainForm : Form
         int translated = 0;
         int translationMissed = 0;
         int translationFailed = 0;
+        // Offline or blocked: stop after a few failures in a row instead of trying every game.
+        const int MaxFailuresInARow = 3;
+        int failuresInARow = 0;
 
         try
         {
-            for (int i = 0; i < pending.Count; i++)
+            for (int i = 0; i < pending.Count && failuresInARow < MaxFailuresInARow; i++)
             {
                 token.ThrowIfCancellationRequested();
                 var game = pending[i];
@@ -902,22 +909,25 @@ internal sealed class MainForm : Form
                 {
                     SaveMetadata(game, metadata);
                     added++;
+                    failuresInARow = 0;
                 }
                 else if (result.NotFound)
                 {
                     MarkMetadataChecked(game);
                     missed++;
+                    failuresInARow = 0;
                 }
                 else
                 {
                     failed++;
+                    failuresInARow++;
                 }
 
                 if (i < pending.Count - 1 || translations.Count > 0)
                     await Task.Delay(1000, token);
             }
 
-            for (int i = 0; i < translations.Count; i++)
+            for (int i = 0; i < translations.Count && failuresInARow < MaxFailuresInARow; i++)
             {
                 token.ThrowIfCancellationRequested();
                 var game = translations[i];
@@ -933,15 +943,18 @@ internal sealed class MainForm : Form
                 {
                     SaveEnglish(game, translation);
                     translated++;
+                    failuresInARow = 0;
                 }
                 else if (result.NotFound)
                 {
                     MarkMetadataEnglishChecked(game);
                     translationMissed++;
+                    failuresInARow = 0;
                 }
                 else
                 {
                     translationFailed++;
+                    failuresInARow++;
                 }
 
                 if (i < translations.Count - 1 || englishTitles.Count > 0)
@@ -950,7 +963,7 @@ internal sealed class MainForm : Form
 
             // One English-edition lookup per product; copies of a game share the result.
             var editionTitles = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < englishTitles.Count; i++)
+            for (int i = 0; i < englishTitles.Count && failuresInARow < MaxFailuresInARow; i++)
             {
                 token.ThrowIfCancellationRequested();
                 var game = englishTitles[i];
@@ -961,10 +974,15 @@ internal sealed class MainForm : Form
                     SetStatus($"Looking for English titles {i + 1} of {englishTitles.Count} \u00b7 {game.CardTitle}\u2026",
                         transient: false);
                     var result = await LookupEnglishTitleAsync(metadata, token);
-                    if (result is null) continue; // failed: tried again next launch
+                    if (i < englishTitles.Count - 1) await Task.Delay(1000, token);
+                    if (result is null)
+                    {
+                        failuresInARow++;
+                        continue; // tried again next launch
+                    }
+                    failuresInARow = 0;
                     title = result.Value.Title;
                     editionTitles[metadata.ProductId] = title;
-                    if (i < englishTitles.Count - 1) await Task.Delay(1000, token);
                 }
 
                 if (title is not null)
@@ -1278,6 +1296,7 @@ internal sealed class MainForm : Form
                     {
                         string url = game.Metadata!.ImageUrl!;
                         if (url.StartsWith("//", StringComparison.Ordinal)) url = "https:" + url;
+                        if (!WebLinks.IsTrusted(url)) continue;
                         var bytes = await MetadataService.Client.GetByteArrayAsync(url, token);
                         using (var check = new MemoryStream(bytes, writable: false))
                         using (Image.FromStream(check, useEmbeddedColorManagement: false, validateImageData: false)) { }

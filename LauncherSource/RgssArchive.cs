@@ -120,7 +120,7 @@ internal sealed class RgssArchive
             uint size = reader.ReadUInt32() ^ key;
             key = key * 7 + 3;
             long offset = stream.Position;
-            if (offset + size > stream.Length) break;
+            if (offset + size > stream.Length || size > int.MaxValue) break;
 
             entries[Normalize(TextFiles.Decode(name))] = new Entry(offset, (int)size, key);
             stream.Seek(size, SeekOrigin.Current);
@@ -145,7 +145,9 @@ internal sealed class RgssArchive
             var name = reader.ReadBytes((int)nameLength);
             for (int i = 0; i < name.Length; i++)
                 name[i] ^= (byte)(key >> (8 * (i % 4)));
-            entries[Normalize(TextFiles.Decode(name))] = new Entry(offset, (int)size, fileKey);
+            // Entries pointing past the end of the archive are damaged; skip them.
+            if ((long)offset + size <= reader.BaseStream.Length && size <= int.MaxValue)
+                entries[Normalize(TextFiles.Decode(name))] = new Entry(offset, (int)size, fileKey);
         }
         return entries;
     }

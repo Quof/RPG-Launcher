@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text.Json.Serialization;
 
 namespace RpgLauncher;
 
@@ -9,9 +10,14 @@ namespace RpgLauncher;
 internal sealed class ProxySettings
 {
     /// <summary>e.g. socks5://host:1080 or http://host:8080; empty connects without a proxy.</summary>
-    public string? Address { get; set; }
-    public string? Username { get; set; }
-    public string? Password { get; set; }
+    [JsonIgnore] public string? Address { get; set; }
+    [JsonIgnore] public string? Username { get; set; }
+    [JsonIgnore] public string? Password { get; set; }
+
+    // Saved encrypted, since the address can hold user:pass@ too. Plain values from older files are read as is.
+    [JsonPropertyName("address")] public string? SavedAddress { get => Secrets.Protect(Address); set => Address = Secrets.Unprotect(value); }
+    [JsonPropertyName("username")] public string? SavedUsername { get => Secrets.Protect(Username); set => Username = Secrets.Unprotect(value); }
+    [JsonPropertyName("password")] public string? SavedPassword { get => Secrets.Protect(Password); set => Password = Secrets.Unprotect(value); }
 
     /// <summary>
     /// Network adapter to send DLsite connections through: an adapter name, or
@@ -19,8 +25,8 @@ internal sealed class ProxySettings
     /// </summary>
     public string? Adapter { get; set; }
 
-    public bool HasProxy => !string.IsNullOrWhiteSpace(Address);
-    public bool IsSet => HasProxy || !string.IsNullOrWhiteSpace(Adapter);
+    [JsonIgnore] public bool HasProxy => !string.IsNullOrWhiteSpace(Address);
+    [JsonIgnore] public bool IsSet => HasProxy || !string.IsNullOrWhiteSpace(Adapter);
 
     public ProxySettings Clone() => new() { Address = Address, Username = Username, Password = Password, Adapter = Adapter };
 }

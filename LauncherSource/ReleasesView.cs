@@ -580,7 +580,7 @@ internal sealed class ReleasesView : Control
 
     private static void OpenUrl(string url)
     {
-        if (string.IsNullOrWhiteSpace(url)) return;
+        if (!WebLinks.IsTrusted(url)) return;
         try
         {
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });

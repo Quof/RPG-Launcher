@@ -120,7 +120,7 @@ internal sealed class ProxyDialog : Form
             "Useful when the VPN's split tunneling doesn't catch the launcher.\n" +
             "If the adapter is disconnected, requests fail instead of using your normal connection.");
         _tips.SetToolTip(_address, "socks5://, socks4:// or http:// with a port. Leave empty for no proxy.");
-        _tips.SetToolTip(_password, "Saved in launcher-data.json as plain text.");
+        _tips.SetToolTip(_password, "Saved encrypted for your Windows account.");
 
         _redownload = new CheckBox
         {

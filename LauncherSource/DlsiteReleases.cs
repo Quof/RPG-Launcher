@@ -395,9 +395,8 @@ internal sealed class ReleaseStore
 
             var link = TitleLinkRegex.Match(chunk);
             string title = link.Success ? WebUtility.HtmlDecode(link.Groups["v"].Value).Trim() : Value(DataNameRegex, chunk);
-            string url = link.Success
-                ? link.Groups["url"].Value
-                : $"https://www.dlsite.com/maniax/work/=/product_id/{id}.html";
+            string url = link.Success ? WebUtility.HtmlDecode(link.Groups["url"].Value) : "";
+            if (!WebLinks.IsTrusted(url)) url = $"https://www.dlsite.com/maniax/work/=/product_id/{id}.html";
 
             var item = new ReleaseItem
             {

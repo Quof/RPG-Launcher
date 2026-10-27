@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -22,6 +23,10 @@ internal static class MetadataService
 
     private const string JapaneseLocale = "ja_JP";
     private const string EnglishLocale = "en_US";
+
+    // Cap on store searches per game, across all its names and fallbacks; the rest count as no match.
+    private const int MaxSearchesPerGame = 16;
+    private static readonly AsyncLocal<StrongBox<int>?> SearchesLeft = new();
 
     private static readonly HashSet<string> GenericTitles = new(StringComparer.Ordinal)
     {
@@ -73,6 +78,7 @@ internal static class MetadataService
     {
         MetadataLookupResult? failure = null;
         bool searched = false;
+        SearchesLeft.Value = new StrongBox<int>(MaxSearchesPerGame);
         foreach (string title in titles)
         {
             string query = CleanTitle(title);
@@ -314,6 +320,7 @@ internal static class MetadataService
 
     private static async Task<List<Candidate>> SearchAsync(string site, string keyword, CancellationToken token)
     {
+        if (SearchesLeft.Value is { } left && left.Value-- <= 0) return new List<Candidate>();
         // DLsite returns 403 for %20 in the keyword path; a plus sign is accepted.
         string path = Uri.EscapeDataString(keyword).Replace("%20", "+", StringComparison.Ordinal);
         string html = await Http.GetStringAsync(
@@ -548,7 +555,8 @@ internal static class MetadataService
         var work = doc.RootElement[0];
         if (work.ValueKind != JsonValueKind.Object) return null;
 
-        string id = GetString(work, "workno") ?? candidate.Id;
+        string? workno = GetString(work, "workno");
+        string id = workno is not null && Regex.IsMatch(workno, @"^[A-Za-z]{2}\d+$") ? workno : candidate.Id;
         string title = GetString(work, "work_name") ?? candidate.Title;
         string maker = GetString(work, "maker_name") ?? candidate.Maker;
 
@@ -569,6 +577,7 @@ internal static class MetadataService
             image = GetString(imageElement, "url");
             if (!string.IsNullOrWhiteSpace(image) && image!.StartsWith("//", StringComparison.Ordinal))
                 image = "https:" + image;
+            if (!WebLinks.IsTrusted(image)) image = null;
         }
 
         string? description = CleanDescription(GetString(work, "intro_s") ?? GetString(work, "intro"));
@@ -660,7 +669,7 @@ internal static class MetadataService
         }
         if (!string.IsNullOrWhiteSpace(adapter))
             handler.ConnectCallback = DlsiteConnection.BoundConnect(adapter);
-        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
+        var client = new HttpClient(new RequestThrottle(handler)) { Timeout = TimeSpan.FromSeconds(25) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
         client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/json;q=0.9,*/*;q=0.8");
         client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("ja,en;q=0.8");

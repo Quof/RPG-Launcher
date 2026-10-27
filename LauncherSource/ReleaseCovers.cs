@@ -155,7 +155,6 @@ internal sealed class ReleaseCovers : IDisposable
         _bitmaps.Clear();
         _recent.Clear();
         _pending.Clear();
-        _failed.Clear();
     }
 
     public void Dispose()

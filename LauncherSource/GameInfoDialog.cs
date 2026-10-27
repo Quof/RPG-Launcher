@@ -294,7 +294,7 @@ internal sealed class GameInfoDialog : Form
     private void OpenStorePage()
     {
         string url = _metadata.UrlFor(_language);
-        if (string.IsNullOrWhiteSpace(url)) return;
+        if (!WebLinks.IsTrusted(url)) return;
         try
         {
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
