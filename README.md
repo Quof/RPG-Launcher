@@ -15,6 +15,7 @@ A Windows launcher for RPG Maker and Wolf RPG Editor games that shows title scre
 ## Supported engines
 
 | Engine | Detected by |
+| --- | --- |
 | RPG Maker MV / MZ | `www\data\System.json` or `data\System.json` |
 | RPG Maker VX Ace / VX / XP | `Game.ini` with `Data\` or a `.rgss3a` / `.rgss2a` / `.rgssad` archive |
 | RPG Maker 2000 / 2003 | `RPG_RT.exe` / `RPG_RT.ldb` |
