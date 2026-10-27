@@ -1,0 +1,16 @@
+# Build output
+LauncherSource/bin/
+LauncherSource/obj/
+.vs/
+*.user
+*.exe
+
+# User data and caches written next to the exe
+launcher-data.json
+launcher-data.json.broken
+launcher-data.json.tmp
+launcher-library.json
+launcher-library.json.tmp
+launcher-thumbnails/
+launcher-images/
+launcher-dlsite/
