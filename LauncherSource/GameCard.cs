@@ -70,6 +70,8 @@ internal sealed class GameCard : IDisposable
     }
 
     public event Action<GameEntry>? PlayRequested;
+    /// <summary>Play with Cheats (MV/MZ, or showing the open cheat window), or test mode for other RPG Maker games.</summary>
+    public event Action<GameEntry>? CheatsRequested;
     public event Action<GameEntry>? FavoriteToggled;
     public event Action<GameEntry, int>? RatingChanged;
     public event Action<GameEntry>? OpenFolderRequested;
@@ -248,6 +250,10 @@ internal sealed class GameCard : IDisposable
         var play = Menus.Item("Play", (_, _) => PlayRequested?.Invoke(Game));
         play.Font = MenuBoldFont;
         menu.Items.Add(play);
+        if (Game.Family == EngineFamily.MvMz)
+            menu.Items.Add(Menus.Item(Game.CheatsOn ? "Show Cheats" : "Play with Cheats", (_, _) => CheatsRequested?.Invoke(Game)));
+        else if (Game.Family != EngineFamily.Wolf)
+            menu.Items.Add(Menus.Item("Play in Test Mode", (_, _) => CheatsRequested?.Invoke(Game)));
 
         menu.Items.Add(Menus.Item("Open game folder", (_, _) => OpenFolderRequested?.Invoke(Game)));
 

@@ -33,6 +33,7 @@ Encrypted MV/MZ images and RGSS archives are read directly. Wolf games use the f
 - **Names and pictures** — cards use the DLsite title and image, or the game's cleaned title and title screen. Right-click a card to rename it, change or reframe its picture, or choose title screen or DLsite image.
 - **New on DLsite** — games released in the last 30 days, with price, discount, rating and tags.
 - **Display** — four styles, rectangular or square cards, optional paging, English or Japanese metadata. On screens of 2560×1440 or more the window opens at 1920×1080.
+- **Cheats** — right-click an MV or MZ game → **Play with Cheats** to change gold, levels, EXP, HP, MP and stats while playing, heal the party, or walk through walls. Other RPG Maker games get **Play in Test Mode**. See [Cheats](#cheats).
 
 | Key | Action |
 | --- | --- |
@@ -47,6 +48,13 @@ Encrypted MV/MZ images and RGSS archives are read directly. Wolf games use the f
 - New on DLsite caches each day's releases for 30 days.
 - Requests to DLsite pages are at least a second apart. If DLsite answers "too many requests", the launcher pauses and stops its queues.
 - **⋯ → DLsite connection…** sends DLsite requests through a chosen network adapter (such as a VPN) or a SOCKS/HTTP proxy. If that route is unavailable, requests fail rather than go direct. **Test** shows which country DLsite sees. Proxy settings are saved encrypted (Windows DPAPI), readable only by your Windows account.
+
+## Cheats
+
+- **Play with Cheats** (MV, MZ) opens a cheat window beside the game. Values update live; a field you're editing is kept until you press **Apply**. Stats stop at the game's own caps. Walking through walls also stops random battles, as in a playtest. Changes are in the running game, so save in the game to keep them.
+- To connect, the launcher appends a short script to the game's `js/plugins.js` and removes it as soon as the game has loaded it. The file is restored byte for byte, with its original date. The script only answers the launcher (a one-time token over a local port). A copy left behind by a crash stops working after 5 minutes and is removed the next time the game is played.
+- **Play in Test Mode** (VX Ace, VX, XP, 2000/2003) starts the engine's own test play: hold Ctrl to walk through walls; F9 opens the switch and variable editor.
+- Wolf RPG Editor games have no cheats.
 
 ## Data
 

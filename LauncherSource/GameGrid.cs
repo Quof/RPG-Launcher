@@ -32,6 +32,7 @@ internal sealed class GameGrid : Panel
     private int _side;
 
     public event Action<GameEntry>? PlayRequested;
+    public event Action<GameEntry>? CheatsRequested;
     public event Action<GameEntry>? FavoriteToggled;
     public event Action<GameEntry, string?>? GroupToggled;
     public event Action<GameEntry>? RenameRequested;
@@ -80,6 +81,7 @@ internal sealed class GameGrid : Panel
                 // Cards start hidden; PositionCards shows the ones in view.
                 card = new GameCard(this, game);
                 card.PlayRequested += g => PlayRequested?.Invoke(g);
+                card.CheatsRequested += g => CheatsRequested?.Invoke(g);
                 card.FavoriteToggled += g => FavoriteToggled?.Invoke(g);
                 card.RatingChanged += (g, rating) => RatingChanged?.Invoke(g, rating);
                 card.OpenFolderRequested += g => OpenFolderRequested?.Invoke(g);

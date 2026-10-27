@@ -28,6 +28,26 @@ internal sealed class MainForm : Form
     private readonly Dictionary<string, int> _running = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Process> _processes = new();
 
+    /// <summary>MV/MZ games started with Play with Cheats, by game key, while they run.</summary>
+    private readonly Dictionary<string, CheatLaunch> _cheatLaunches = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed class CheatLaunch
+    {
+        public CheatLaunch(int port, string secret, string pluginsFile)
+        {
+            Port = port;
+            Secret = secret;
+            PluginsFile = pluginsFile;
+        }
+
+        public int Port { get; }
+        public string Secret { get; }
+        public string PluginsFile { get; }
+        public CheatWindow? Window { get; set; }
+        /// <summary>The game's process: the session ends when it exits, not when another copy of the game does.</summary>
+        public Process? Process { get; set; }
+    }
+
     private readonly SemaphoreSlim _metadataGate = new(1, 1);
 
     private List<GameEntry> _games = new();
@@ -161,6 +181,7 @@ internal sealed class MainForm : Form
         _moreButton.Click += (_, _) => ShowMoreMenu();
 
         _grid.PlayRequested += PlayGame;
+        _grid.CheatsRequested += PlayWithCheats;
         _grid.FavoriteToggled += ToggleFavorite;
         _grid.RatingChanged += ChangeRating;
         _grid.GroupToggled += ToggleGroup;
@@ -632,6 +653,7 @@ internal sealed class MainForm : Form
         foreach (var game in _games)
         {
             if (_running.TryGetValue(game.Key, out int running)) game.RunningCount = running;
+            game.CheatsOn = _cheatLaunches.ContainsKey(game.Key);
         }
 
         bool tagCleared = ValidateTagFilter();
@@ -2760,12 +2782,117 @@ internal sealed class MainForm : Form
 
     private void PlayGame(GameEntry game)
     {
+        // A cheat script left behind by a launcher that didn't close normally.
+        if (game.Family == EngineFamily.MvMz && game.DataRoot is { } root && !_cheatLaunches.ContainsKey(game.Key))
+        {
+            try { CheatBridge.Uninstall(CheatBridge.PluginsFile(root)); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* it expires on its own */ }
+        }
+        StartGame(game, null, out _);
+    }
+
+    /// <summary>
+    /// MV/MZ: starts the game with the cheat script and opens the cheat window (or shows the open one).
+    /// Other RPG Maker games start in test mode, which has the engine's own noclip and debug menu.
+    /// </summary>
+    private void PlayWithCheats(GameEntry game)
+    {
+        if (game.Family != EngineFamily.MvMz)
+        {
+            string arguments = game.Family switch
+            {
+                EngineFamily.Xp => "debug",
+                EngineFamily.Rm2k => "TestPlay Window",
+                _ => "test"
+            };
+            if (StartGame(game, arguments, out _))
+                SetStatus($"{game.CardTitle} is in test mode \u00b7 hold Ctrl to walk through walls \u00b7 F9 opens the debug menu (switches and variables)");
+            return;
+        }
+
+        if (_cheatLaunches.TryGetValue(game.Key, out var running))
+        {
+            ShowCheatWindow(game, running);
+            return;
+        }
+        if (game.IsRunning)
+        {
+            MessageBox.Show(this,
+                $"{game.CardTitle} is already running.\n\nClose it first: cheats are added when the launcher starts the game.",
+                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string? plugins = game.DataRoot is { } root ? CheatBridge.PluginsFile(root) : null;
+        if (plugins is null || !File.Exists(plugins))
+        {
+            MessageBox.Show(this, $"Cheats need the game's js\\plugins.js, which {game.CardTitle} doesn't have.",
+                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var launch = new CheatLaunch(CheatBridge.FreePort(), CheatBridge.NewToken(), plugins);
+        try
+        {
+            CheatBridge.Install(plugins, launch.Port, launch.Secret);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Couldn't add cheats to {game.CardTitle}: its js\\plugins.js can't be changed.\n\n{ex.Message}",
+                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (!StartGame(game, null, out var process))
+        {
+            RemoveCheatScript(launch);
+            return;
+        }
+        launch.Process = process;
+        _cheatLaunches[game.Key] = launch;
+        game.CheatsOn = true;
+        _grid.RefreshCard(game);
+        ShowCheatWindow(game, launch);
+    }
+
+    private void ShowCheatWindow(GameEntry game, CheatLaunch launch)
+    {
+        if (launch.Window is { IsDisposed: false } open)
+        {
+            if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
+            open.Activate();
+            return;
+        }
+        var window = new CheatWindow(game.CardTitle, launch.Port, launch.Secret, Icon, () => RemoveCheatScript(launch));
+        window.FormClosed += (_, _) => { if (launch.Window == window) launch.Window = null; };
+        launch.Window = window;
+        window.Show();
+    }
+
+    /// <summary>Takes the cheat script out of plugins.js once the game has loaded it (or never will).</summary>
+    private static void RemoveCheatScript(CheatLaunch launch)
+    {
+        try
+        {
+            CheatBridge.Uninstall(launch.PluginsFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // It does nothing after a few minutes, and the next Play removes it.
+            Diagnostics.Log("Cheat script not removed: " + ex.Message);
+        }
+    }
+
+    /// <summary>Starts the game and tracks it; false if it couldn't be started.</summary>
+    private bool StartGame(GameEntry game, string? arguments, out Process? started)
+    {
+        started = null;
         if (string.IsNullOrWhiteSpace(game.ExecutablePath) || !File.Exists(game.ExecutablePath))
         {
             MessageBox.Show(this,
                 $"No game executable was found for:\n{game.CardTitle}\n\nExpected Game.exe, nw.exe or RPG_RT.exe in:\n{game.RootPath}",
                 "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            return false;
         }
 
         try
@@ -2773,10 +2900,12 @@ internal sealed class MainForm : Form
             var startInfo = new ProcessStartInfo
             {
                 FileName = game.ExecutablePath,
+                Arguments = arguments ?? "",
                 WorkingDirectory = game.RootPath,
                 UseShellExecute = true
             };
             var process = Process.Start(startInfo);
+            started = process;
 
             game.PlayCount++;
             game.LastPlayedUtc = DateTime.UtcNow;
@@ -2814,18 +2943,26 @@ internal sealed class MainForm : Form
 
             if (_store.Data.Sort is SortMode.RecentlyPlayed or SortMode.MostPlayed)
                 RefreshView();
+            return true;
         }
         catch (Exception ex)
         {
             MessageBox.Show(this,
                 $"Could not start the game:\n{ex.Message}\n\n{game.ExecutablePath}",
                 "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
     }
 
     private void OnGameExited(string key, Process process, long seconds)
     {
         _processes.Remove(process);
+        if (_cheatLaunches.TryGetValue(key, out var launch) && (launch.Process is null || launch.Process == process))
+        {
+            _cheatLaunches.Remove(key);
+            RemoveCheatScript(launch);
+            launch.Window?.Close();
+        }
 
         if (_store.Data.Games.TryGetValue(key, out var record))
             record.PlaySeconds += Math.Max(0, seconds);
@@ -2836,6 +2973,7 @@ internal sealed class MainForm : Form
             game.PlaySeconds += Math.Max(0, seconds);
             game.RunningCount = Math.Max(0, game.RunningCount - 1);
             _running[key] = game.RunningCount;
+            game.CheatsOn = _cheatLaunches.ContainsKey(key);
             _grid.RefreshCard(game);
             SetStatus($"{game.CardTitle} closed \u00b7 played {Theme.FormatDuration(Math.Max(1, seconds))}");
             if (_store.Data.Sort is SortMode.RecentlyPlayed or SortMode.MostPlayed) RefreshView();
@@ -2927,6 +3065,12 @@ internal sealed class MainForm : Form
         catch
         {
             // closing should never be blocked by save problems
+        }
+
+        foreach (var launch in _cheatLaunches.Values)
+        {
+            RemoveCheatScript(launch);
+            launch.Window?.Close();
         }
 
         _loadCts?.Cancel();

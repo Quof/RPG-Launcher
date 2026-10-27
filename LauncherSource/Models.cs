@@ -131,6 +131,8 @@ internal sealed class GameEntry
     // Runtime only
     [JsonIgnore] public Bitmap? Thumbnail { get; set; }
     [JsonIgnore] public int RunningCount { get; set; }
+    /// <summary>Started with Play with Cheats and still running.</summary>
+    [JsonIgnore] public bool CheatsOn { get; set; }
     [JsonIgnore] public bool ThumbnailRequested { get; set; }
 
     /// <summary>The whole card picture, uncropped; loaded only for square cards.</summary>
