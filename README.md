@@ -1,6 +1,6 @@
 # RPG Launcher
 
-A Windows launcher for RPG Maker and Wolf RPG Editor games that shows title screens as cards and fills in titles, tags and images from DLsite.
+A Windows launcher for RPG Maker and Wolf RPG Editor games that shows title screens as cards and fills in titles, tags and images from DLsite. (Or to be more honest, this is basically an HRPG launcher built around organizing DLsite games and checking new releases on the site more easily).
 
 ## Quick start
 
