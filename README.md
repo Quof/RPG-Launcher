@@ -1,17 +1,20 @@
 # RPG Launcher
 
-A Windows launcher for RPG Maker and Wolf RPG Editor games that shows title screens as cards and fills in titles, tags and images from DLsite. (Or to be more honest, this is basically an HRPG launcher built around organizing DLsite games and checking new releases on the site more easily).
+A Windows launcher for RPG Maker and Wolf RPG Editor games that shows title screens as cards and fills in titles, tags and images from DLsite. 
+
+...Or to be more honest, this is basically an HRPG launcher built around organizing DLsite games and checking new releases on the site more easily. The main feature of convenience is built-in network adapter + proxy settings to more easily check DLsite's page through a Japanese VPN without needing to constantly turn the VPN on or off. This launcher was completely vibecoded and while it works for me I really have no idea how any of the network stuff works, so go in with due caution and all that.
+
+![RPG Launcher](docs/screenshot1.png)
 
 ## Quick start
 
-1. Build `RPG Launcher.exe` (see [Building](#building)) and put it in the folder that holds your games.
-2. Run it. It scans that folder up to three levels deep. **⋯ → Add directory…** adds folders elsewhere.
-3. Click a card to play. Press `F5` after adding games.
+1. Download the launcher from the releases and put it in the holder with your games (or anywhere).
+2. Run it. It scans that folder up to three levels deep. You can add other folders by going to the options menu (the ... menu) and choosing "Add Directory."
+3. Click a game to play. Press `F5` to refresh the page after adding new games.
 
 ## Supported engines
 
 | Engine | Detected by |
-| --- | --- |
 | RPG Maker MV / MZ | `www\data\System.json` or `data\System.json` |
 | RPG Maker VX Ace / VX / XP | `Game.ini` with `Data\` or a `.rgss3a` / `.rgss2a` / `.rgssad` archive |
 | RPG Maker 2000 / 2003 | `RPG_RT.exe` / `RPG_RT.ldb` |
