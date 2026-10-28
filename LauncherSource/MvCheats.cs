@@ -12,7 +12,8 @@ internal enum MvPhase
 
 internal sealed record MvActor(int Id, string Name, int Level, int MaxLevel, long Exp, long NextExp, long Hp, long Mp, long[] Params);
 
-internal sealed record MvState(MvPhase Phase, long Gold, bool Noclip, IReadOnlyList<MvActor> Actors);
+/// <summary>What the game shows now; <see cref="Speed"/> is the walking speed factor (1 = the game's own).</summary>
+internal sealed record MvState(MvPhase Phase, long Gold, bool Noclip, double Speed, IReadOnlyList<MvActor> Actors);
 
 /// <summary>Changes to one actor; null leaves a value as it is.</summary>
 internal sealed record MvActorChanges(int Id, long? Level, long? Exp, long? Hp, long? Mp, long?[] Params);
@@ -44,8 +45,9 @@ function rpgLauncherPhase() {
     actors.push({ id: a.actorId(), name: a.name(), level: a.level, maxLevel: a.maxLevel(), exp: a.currentExp(),
                   next: a.isMaxLevel() ? -1 : a.nextLevelExp(), hp: a.hp, mp: a.mp, params: params });
   }
-  var noclip = Game_Player.prototype.rpgLauncherNoclip;
-  return JSON.stringify({ phase: phase, gold: $gameParty.gold(), noclip: !!(noclip && noclip.on), actors: actors });
+  var noclip = Game_Player.prototype.rpgLauncherNoclip, speed = Game_Player.prototype.rpgLauncherSpeed;
+  return JSON.stringify({ phase: phase, gold: $gameParty.gold(), noclip: !!(noclip && noclip.on),
+                          speed: speed ? speed.factor : 1, actors: actors });
 })()";
 
     private const string GoldScript = @"(function (target) {
@@ -104,13 +106,30 @@ function rpgLauncherPhase() {
   return String(on);
 })";
 
+    // Each step of move speed doubles it (4 is normal walking), so a factor adds log2(factor) steps. Followers copy the
+    // player's speed. Routes the game forces on the player, as in cutscenes, keep their own pace.
+    private const string SpeedScript = @"(function (factor) {
+  var proto = Game_Player.prototype;
+  if (!proto.rpgLauncherSpeed) {
+    var original = proto.realMoveSpeed;
+    proto.rpgLauncherSpeed = { factor: 1, boost: 0 };
+    proto.realMoveSpeed = function () {
+      var speed = original.call(this);
+      return this._moveRouteForcing ? speed : speed + proto.rpgLauncherSpeed.boost;
+    };
+  }
+  proto.rpgLauncherSpeed.factor = factor;
+  proto.rpgLauncherSpeed.boost = Math.log(factor) / Math.LN2;
+  return String(factor);
+})";
+
     public static async Task<MvState> ReadAsync(CheatBridge bridge, CancellationToken token)
     {
         string json = await bridge.EvaluateAsync(ReadScript, token).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         var phase = ParsePhase(Get(root, "phase") is { ValueKind: JsonValueKind.String } p ? p.GetString() : null);
-        if (phase == MvPhase.Loading) return new MvState(phase, 0, false, Array.Empty<MvActor>());
+        if (phase == MvPhase.Loading) return new MvState(phase, 0, false, 1, Array.Empty<MvActor>());
 
         // Plugins can leave values undefined, which JSON drops: missing numbers read as 0.
         var actors = new List<MvActor>();
@@ -133,7 +152,9 @@ function rpgLauncherPhase() {
                     Enumerable.Range(0, ParamNames.Length).Select(i => i < listed.Length ? listed[i] : 0).ToArray()));
             }
         }
-        return new MvState(phase, Number(Get(root, "gold")), Get(root, "noclip").ValueKind == JsonValueKind.True, actors);
+        double speed = Get(root, "speed") is { ValueKind: JsonValueKind.Number } factor && factor.TryGetDouble(out double value) &&
+                       double.IsFinite(value) && value > 0 ? value : 1;
+        return new MvState(phase, Number(Get(root, "gold")), Get(root, "noclip").ValueKind == JsonValueKind.True, speed, actors);
     }
 
     /// <summary>Sets the party's gold (the game caps it at its maximum); null sets the maximum. Returns the new amount.</summary>
@@ -167,6 +188,10 @@ function rpgLauncherPhase() {
 
     public static Task SetNoclipAsync(CheatBridge bridge, bool on, CancellationToken token) =>
         bridge.EvaluateAsync($"{NoclipScript}({(on ? "true" : "false")})", token);
+
+    /// <summary>Makes the player walk <paramref name="factor"/> times as fast as the game would (1 restores it).</summary>
+    public static Task SetSpeedAsync(CheatBridge bridge, double factor, CancellationToken token) =>
+        bridge.EvaluateAsync($"{SpeedScript}({factor.ToString(CultureInfo.InvariantCulture)})", token);
 
     private static MvPhase ParsePhase(string? phase) => phase switch
     {

@@ -163,7 +163,8 @@ internal sealed class CheatBridge : IDisposable
 ";
 
     /// <summary>The js/plugins.js under an MV or MZ game's data root, which the game loads before starting.</summary>
-    public static string PluginsFile(string dataRoot) => Path.Combine(dataRoot, "js", "plugins.js");
+    public static string PluginsFile(string dataRoot) =>
+        Paths.File(Path.Combine(dataRoot, "js", "plugins.js")) ?? Path.Combine(dataRoot, "js", "plugins.js");
 
     /// <summary>Appends the script for this session, replacing any leftover one. The rest of the file is kept byte for byte.</summary>
     public static void Install(string pluginsFile, int port, string secret)

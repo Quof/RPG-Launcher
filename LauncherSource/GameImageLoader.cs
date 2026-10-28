@@ -1,7 +1,6 @@
-﻿using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Security.Cryptography;
 using System.Text;
+using SkiaSharp;
 
 namespace RpgLauncher;
 
@@ -32,7 +31,11 @@ internal static class GameImageLoader
         try
         {
             token.ThrowIfCancellationRequested();
-            return await Task.Run(() => full ? CreateFullThumbnail(game) : CreateThumbnail(game), token).ConfigureAwait(false);
+            return await Task.Run(() =>
+            {
+                using var thumbnail = full ? CreateFullThumbnail(game) : CreateThumbnail(game);
+                return thumbnail is null ? null : ImageKit.ToAvalonia(thumbnail);
+            }, token).ConfigureAwait(false);
         }
         finally
         {
@@ -40,7 +43,7 @@ internal static class GameImageLoader
         }
     }
 
-    private static Bitmap? CreateFullThumbnail(GameEntry game)
+    private static SKBitmap? CreateFullThumbnail(GameEntry game)
     {
         string? cachePath = CachePathFor(game, full: true);
         if (cachePath is not null && TryLoadCached(cachePath, full: true) is { } cached) return cached;
@@ -51,16 +54,9 @@ internal static class GameImageLoader
             if (source is null) return null; // the card falls back to the regular thumbnail
             float fit = Math.Min(1f, Math.Min(FullThumbSize / (float)source.Width, FullThumbSize / (float)source.Height));
             int w = Math.Max(1, (int)Math.Round(source.Width * fit)), h = Math.Max(1, (int)Math.Round(source.Height * fit));
-            var output = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
-            using (var g = Graphics.FromImage(output))
-            {
-                g.Clear(Palette.Default.Card);
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                using var attributes = new ImageAttributes();
-                attributes.SetWrapMode(WrapMode.TileFlipXY);
-                g.DrawImage(source, new Rectangle(0, 0, w, h), 0, 0, source.Width, source.Height, GraphicsUnit.Pixel, attributes);
-            }
+            var output = ImageKit.Create(w, h, Palette.Default.Card);
+            using (var canvas = new SKCanvas(output))
+                ImageKit.Draw(canvas, source, SKRect.Create(source.Width, source.Height), SKRect.Create(w, h));
             if (cachePath is not null) SaveCached(output, cachePath);
             return output;
         }
@@ -70,7 +66,7 @@ internal static class GameImageLoader
         }
     }
 
-    private static Bitmap? CreateThumbnail(GameEntry game)
+    private static SKBitmap? CreateThumbnail(GameEntry game)
     {
         string? cachePath = CachePathFor(game);
         if (cachePath is not null && TryLoadCached(cachePath) is { } cached) return cached;
@@ -130,15 +126,19 @@ internal static class GameImageLoader
         return string.IsNullOrWhiteSpace(name) ? "?" : name[..1].ToUpperInvariant();
     }
 
-    private static Bitmap? TryLoadCached(string path, bool full = false)
+    private static SKBitmap? TryLoadCached(string path, bool full = false)
     {
         try
         {
             if (!File.Exists(path)) return null;
-            using var stream = new MemoryStream(File.ReadAllBytes(path), writable: false);
-            using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
-            if (!full && (image.Width != ThumbWidth || image.Height != ThumbHeight)) return null;
-            return new Bitmap(image);
+            var image = ImageKit.Decode(File.ReadAllBytes(path));
+            if (image is null) return null;
+            if (!full && (image.Width != ThumbWidth || image.Height != ThumbHeight))
+            {
+                image.Dispose();
+                return null;
+            }
+            return image;
         }
         catch
         {
@@ -146,17 +146,12 @@ internal static class GameImageLoader
         }
     }
 
-    private static void SaveCached(Bitmap thumbnail, string path)
+    private static void SaveCached(SKBitmap thumbnail, string path)
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var encoder = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
-            using var parameters = new EncoderParameters(1);
-            parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 92L);
-            var temp = path + ".tmp";
-            thumbnail.Save(temp, encoder, parameters);
-            File.Move(temp, path, overwrite: true);
+            ImageKit.SaveJpeg(thumbnail, path, 92);
         }
         catch (Exception ex)
         {
@@ -183,14 +178,14 @@ internal static class GameImageLoader
         }
     }
 
-    private static Bitmap? BuildThumbnail(GameEntry game)
+    private static SKBitmap? BuildThumbnail(GameEntry game)
     {
         try
         {
             using var source = LoadSourceImage(game);
             if (source is not null) return RenderFramed(source, game.Framing ?? DefaultFraming(game));
 
-            using var icon = HasOwnIcon(game) ? LoadIcon(game.IconPath!) : null;
+            using var icon = HasOwnIcon(game) ? LoadImage(game.IconPath!, null) : null;
             return ComposeFallback(icon, game);
         }
         catch
@@ -203,7 +198,7 @@ internal static class GameImageLoader
     /// The full-size card picture: the custom image, else the DLsite image (<see cref="GameEntry.WantsStoreImage"/>),
     /// else the title screen (title2 over title1). Null when there is none or only a stock background.
     /// </summary>
-    public static Bitmap? LoadSourceImage(GameEntry game)
+    public static SKBitmap? LoadSourceImage(GameEntry game)
     {
         if (game.CustomImagePath is not null && LoadImage(game.CustomImagePath, null) is { } custom)
             return custom;
@@ -212,24 +207,38 @@ internal static class GameImageLoader
             return store;
 
         if (game.Title1Path is null || game.HidesStockTitle) return null;
-        using var background = LoadImage(game.Title1Path, game.EncryptionKey);
+        var background = LoadImage(game.Title1Path, game.EncryptionKey);
         // Some games leave a blank title picture and draw their title another way.
-        if (background is null || IsBlank(background)) return null;
-        using var foreground = game.Title2Path is null ? null : LoadImage(game.Title2Path, game.EncryptionKey);
-
-        var canvas = new Bitmap(background.Width, background.Height, PixelFormat.Format32bppPArgb);
-        using (var g = Graphics.FromImage(canvas))
+        if (background is null || IsBlank(background))
         {
-            g.CompositingMode = CompositingMode.SourceOver;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.DrawImageUnscaled(background, 0, 0);
-            if (foreground is not null) g.DrawImageUnscaled(foreground, 0, 0);
+            background?.Dispose();
+            return null;
         }
-        return TrimLetterbox(canvas);
+        using var foreground = game.Title2Path is null ? null : LoadImage(game.Title2Path, game.EncryptionKey);
+        if (foreground is not null)
+        {
+            using var canvas = new SKCanvas(background);
+            canvas.DrawBitmap(foreground, 0, 0);
+        }
+        return TrimLetterbox(background);
+    }
+
+    /// <summary>The card picture as an Avalonia bitmap, for dialogs; null when there is none.</summary>
+    public static Bitmap? LoadSourcePicture(GameEntry game)
+    {
+        using var source = LoadSourceImage(game);
+        return source is null ? null : ImageKit.ToAvalonia(source);
+    }
+
+    /// <summary>A picture file as an Avalonia bitmap; null when it can't be read.</summary>
+    public static Bitmap? LoadPicture(string path)
+    {
+        using var image = LoadImage(path, null);
+        return image is null ? null : ImageKit.ToAvalonia(image);
     }
 
     /// <summary>True when a picture is a single flat colour.</summary>
-    private static bool IsBlank(Bitmap image)
+    private static bool IsBlank(SKBitmap image)
     {
         var first = image.GetPixel(0, 0);
         for (int y = 0; y < 8; y++)
@@ -237,20 +246,20 @@ internal static class GameImageLoader
             for (int x = 0; x < 8; x++)
             {
                 var c = image.GetPixel(x * (image.Width - 1) / 7, y * (image.Height - 1) / 7);
-                if (Math.Abs(c.R - first.R) > 10 || Math.Abs(c.G - first.G) > 10 || Math.Abs(c.B - first.B) > 10 ||
-                    Math.Abs(c.A - first.A) > 10) return false;
+                if (Math.Abs(c.Red - first.Red) > 10 || Math.Abs(c.Green - first.Green) > 10 ||
+                    Math.Abs(c.Blue - first.Blue) > 10 || Math.Abs(c.Alpha - first.Alpha) > 10) return false;
             }
         }
         return true;
     }
 
     /// <summary>Trims black letterbox bars, at most a fifth per side, off a title screen.</summary>
-    private static Bitmap TrimLetterbox(Bitmap image)
+    private static SKBitmap TrimLetterbox(SKBitmap image)
     {
         int w = image.Width, h = image.Height;
         if (w < 32 || h < 32) return image;
 
-        bool Dark(Color c) => c.A > 200 && c.R < 28 && c.G < 28 && c.B < 28;
+        bool Dark(SKColor c) => c.Alpha > 200 && c.Red < 28 && c.Green < 28 && c.Blue < 28;
         bool RowDark(int y)
         {
             for (int x = 0; x < w; x += 3)
@@ -276,79 +285,91 @@ internal static class GameImageLoader
         if (w - right < 3) right = w;
         if (top == 0 && bottom == h && left == 0 && right == w) return image;
 
-        var trimmed = image.Clone(new Rectangle(left, top, right - left, bottom - top), image.PixelFormat);
+        var trimmed = ImageKit.Crop(image, new SKRectI(left, top, right, bottom));
         image.Dispose();
         return trimmed;
     }
 
-    private static Bitmap RenderFramed(Bitmap source, ImageFraming? framing)
+    private static SKBitmap RenderFramed(SKBitmap source, ImageFraming? framing)
     {
-        var output = new Bitmap(ThumbWidth, ThumbHeight, PixelFormat.Format32bppPArgb);
-        using var g = Graphics.FromImage(output);
         // Cached thumbnails must not depend on the style that happened to be active.
-        g.Clear(Palette.Default.Card);
-        var dest = new RectangleF(0, 0, ThumbWidth, ThumbHeight);
+        var output = ImageKit.Create(ThumbWidth, ThumbHeight, Palette.Default.Card);
+        using var canvas = new SKCanvas(output);
+        var dest = SKRect.Create(ThumbWidth, ThumbHeight);
 
         if (framing is null || framing.IsDefault)
         {
-            Theme.DrawCover(g, source, dest);
+            ImageKit.DrawCover(canvas, source, dest);
             return output;
         }
 
-        var crop = ImageFraming.CropRect(source.Size, framing);
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        // Clamp sampling at the crop edge so zoomed crops don't pick up a dark fringe.
-        using var attributes = new ImageAttributes();
-        attributes.SetWrapMode(WrapMode.TileFlipXY);
-        g.DrawImage(source, Rectangle.Round(dest), crop.X, crop.Y, crop.Width, crop.Height,
-            GraphicsUnit.Pixel, attributes);
+        var crop = ImageFraming.CropRect(new Size(source.Width, source.Height), framing);
+        ImageKit.Draw(canvas, source, SKRect.Create((float)crop.X, (float)crop.Y, (float)crop.Width, (float)crop.Height), dest);
         return output;
     }
 
-    private static Bitmap ComposeFallback(Bitmap? icon, GameEntry game)
+    private static SKBitmap ComposeFallback(SKBitmap? icon, GameEntry game)
     {
-        var output = new Bitmap(ThumbWidth, ThumbHeight, PixelFormat.Format32bppPArgb);
-        using var g = Graphics.FromImage(output);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        var output = ImageKit.Create(ThumbWidth, ThumbHeight);
+        using var canvas = new SKCanvas(output);
+        var rect = SKRect.Create(ThumbWidth, ThumbHeight);
 
-        var rect = new Rectangle(0, 0, ThumbWidth, ThumbHeight);
-        using (var gradient = new LinearGradientBrush(rect,
-                   Color.FromArgb(55, 45, 84), Color.FromArgb(20, 20, 29), 42f))
+        // A diagonal violet-to-navy backdrop (about 42°, corner to corner).
+        using (var backdrop = new SKPaint { IsAntialias = true })
         {
-            g.FillRectangle(gradient, rect);
+            backdrop.Shader = SKShader.CreateLinearGradient(new SKPoint(0, 14), new SKPoint(ThumbWidth, ThumbHeight - 14),
+                new[] { new SKColor(55, 45, 84), new SKColor(20, 20, 29) }, SKShaderTileMode.Clamp);
+            canvas.DrawRect(rect, backdrop);
         }
 
-        using (var glowPath = new GraphicsPath())
+        using (var glow = new SKPaint { IsAntialias = true, Color = new SKColor(240, 197, 94, 20) })
         {
-            glowPath.AddEllipse(-80, 40, 380, 380);
-            using var glow = new SolidBrush(Color.FromArgb(20, 240, 197, 94));
-            g.FillPath(glow, glowPath);
-            using var inner = new SolidBrush(Color.FromArgb(18, 240, 197, 94));
-            g.FillEllipse(inner, 10, 110, 230, 230);
+            canvas.DrawOval(SKRect.Create(-80, 40, 380, 380), glow);
+            glow.Color = new SKColor(240, 197, 94, 18);
+            canvas.DrawOval(SKRect.Create(10, 110, 230, 230), glow);
         }
 
         if (icon is not null)
         {
             float scale = Math.Min(150f / icon.Width, 150f / icon.Height);
-            float w = icon.Width * scale;
-            float h = icon.Height * scale;
-            g.DrawImage(icon, new RectangleF((ThumbWidth - w) / 2f, (ThumbHeight - h) / 2f, w, h));
+            float w = icon.Width * scale, h = icon.Height * scale;
+            ImageKit.Draw(canvas, icon, SKRect.Create(icon.Width, icon.Height),
+                SKRect.Create((ThumbWidth - w) / 2f, (ThumbHeight - h) / 2f, w, h));
         }
         else
         {
-            var initial = PlaceholderInitial(game);
-            using var font = Theme.Font(64f, FontStyle.Bold);
-            Theme.DrawText(g, initial, font, Color.FromArgb(120, 240, 197, 94),
-                new RectangleF(0, 0, ThumbWidth, ThumbHeight));
+            DrawInitial(canvas, PlaceholderInitial(game), rect);
         }
 
         return output;
     }
 
-    public static Bitmap? LoadImage(string path, string? encryptionKey)
+    /// <summary>Draws one big bold letter centered in <paramref name="rect"/>, in translucent gold.</summary>
+    private static void DrawInitial(SKCanvas canvas, string initial, SKRect rect)
+    {
+        var style = SKFontStyle.Bold;
+        var typeface = SKTypeface.FromFamilyName(Look.FontFamilyName, style) ?? SKTypeface.Default;
+        // Japanese or other letters the font lacks come from a font that has them.
+        int codepoint = char.ConvertToUtf32(initial, 0);
+        if (typeface.GetGlyph(codepoint) == 0 &&
+            SKFontManager.Default.MatchCharacter(Look.FontFamilyName, style, null, codepoint) is { } fallback)
+            typeface = fallback;
+
+        using var paint = new SKPaint
+        {
+            IsAntialias = true,
+            Color = new SKColor(240, 197, 94, 120),
+            Typeface = typeface,
+            TextSize = 64f * 96f / 72f
+        };
+        float width = paint.MeasureText(initial);
+        var metrics = paint.FontMetrics;
+        float x = rect.MidX - width / 2f;
+        float baseline = rect.MidY - (metrics.Ascent + metrics.Descent) / 2f;
+        canvas.DrawText(initial, x, baseline, paint);
+    }
+
+    public static SKBitmap? LoadImage(string path, string? encryptionKey)
     {
         try
         {
@@ -357,11 +378,7 @@ internal static class GameImageLoader
             if (bytes is null) return null;
             if (Rm2kFiles.IsXyz(bytes)) return Rm2kFiles.DecodeXyz(bytes);
             bytes = DecryptIfNeeded(bytes, encryptionKey);
-            if (bytes is null) return null;
-
-            using var stream = new MemoryStream(bytes, writable: false);
-            using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
-            return new Bitmap(image);
+            return bytes is null ? null : ImageKit.Decode(bytes);
         }
         catch
         {
@@ -394,22 +411,5 @@ internal static class GameImageLoader
         for (int i = 0; i < Math.Min(16, body.Length); i++)
             body[i] ^= key[i];
         return body;
-    }
-
-    private static Bitmap? LoadIcon(string path)
-    {
-        try
-        {
-            if (path.EndsWith(".ico", StringComparison.OrdinalIgnoreCase))
-            {
-                using var icon = new Icon(path, 256, 256);
-                return icon.ToBitmap();
-            }
-            return LoadImage(path, null);
-        }
-        catch
-        {
-            return null;
-        }
     }
 }

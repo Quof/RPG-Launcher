@@ -1,4 +1,6 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Automation;
+using Avalonia.Rendering;
+using Avalonia.Styling;
 
 namespace RpgLauncher;
 
@@ -13,21 +15,30 @@ internal sealed record TagPicking(string GameName, IReadOnlySet<string> Locked);
 /// Popup listing store tags by type with game counts; a click cycles show / hide / off.
 /// With a <see cref="TagPicking"/> it toggles one game's tags instead, and new tags can be typed in.
 /// </summary>
-internal sealed class TagFilterPopup : Form
+/// <remarks>
+/// A borderless window owned by the window it opens over, as the WinForms form was: it has the keyboard while
+/// open (scrolling keys, Escape, typing a new tag through an input method) and closes when it loses activation,
+/// which a click anywhere else does; that click still reaches whatever was clicked. <see cref="Window.Closed"/>
+/// replaces WinForms' FormClosed.
+/// </remarks>
+internal sealed class TagFilterPopup : Window
 {
+    private const double Side = 20;
+    private const double HeaderHeight = 70;
+    private const double PopupWidth = 700;
+
+    private static readonly UiFont CaptionFont = Look.Font(10, bold: true);
+    private static readonly UiFont SubtitleFont = Look.Font(8.3);
+
+    private readonly Surface _surface;
     private readonly TagList _list;
-    private readonly Font _captionFont = Theme.Font(10f, FontStyle.Bold);
-    private readonly Font _subtitleFont = Theme.Font(8.3f);
-    private readonly float _scale;
-    private readonly int _side;
-    private readonly int _headerHeight;
     private readonly TagFilter _filter;
     private readonly TagPicking? _picking;
     private readonly TextBox? _newTag;
-    private Rectangle _newTagField;
-    private Rectangle _clearRect;
+    private Window? _owner;
     private bool _clearHover;
     private bool _ready;
+    private bool _closing;
 
     /// <summary>Raised after each change; the shared filter already holds the new state.</summary>
     public event Action? FilterChanged;
@@ -43,131 +54,187 @@ internal sealed class TagFilterPopup : Form
         TagFilter filter,
         int gameCount,
         MetadataLanguage language,
-        float scale,
         TagPicking? picking = null)
     {
-        _scale = scale;
         _picking = picking;
-        _side = (int)Math.Round(20f * scale);
-        _headerHeight = (int)Math.Round(70f * scale);
-
-        int width = (int)Math.Round(700f * scale);
-        int contentWidth = width - 2;
         _filter = filter;
-        _list = new TagList(groups, filter, scale, picking)
-        {
-            Dock = DockStyle.Fill
-        };
+        _list = new TagList(groups, filter, picking);
 
-        int contentHeight = _list.Measure(contentWidth);
-        int maxContent = (int)Math.Round(520f * scale);
-        int visibleContent = Math.Max((int)Math.Round(150f * scale), Math.Min(contentHeight, maxContent));
+        double contentHeight = _list.MeasureContent(PopupWidth - 2);
+        double visibleContent = Math.Max(150, Math.Min(contentHeight, 520));
 
-        FormBorderStyle = FormBorderStyle.None;
+        SystemDecorations = SystemDecorations.None;
         ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
-        Text = picking is null ? "Filter by tag" : "Add tags";
-        BackColor = Theme.MenuBg;
-        ForeColor = Theme.Text;
-        Font = Theme.Font(9f);
-        AutoScaleMode = AutoScaleMode.None;
-        DoubleBuffered = true;
-        KeyPreview = true;
-        Padding = new Padding(1, _headerHeight, 1, 1);
-        ClientSize = new Size(width, _headerHeight + visibleContent + 1);
-        Controls.Add(_list);
+        CanResize = false;
+        SizeToContent = SizeToContent.Manual;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        Title = picking is null ? "Filter by tag" : "Add tags";
+        Icon = App.WindowIcon;
+        Background = Look.Brush(Look.MenuBg);
+        Foreground = Look.Brush(Look.Text);
+        var font = Look.Font(9);
+        FontFamily = font.Family;
+        FontSize = font.Size;
+        RequestedThemeVariant = Look.IsLight ? ThemeVariant.Light : ThemeVariant.Dark;
+        Width = PopupWidth;
+        Height = HeaderHeight + visibleContent + 1;
+
+        _surface = new Surface(this);
+        _surface.Add(_list);
 
         if (picking is not null)
         {
             // For new tags that no game has yet.
-            _newTag = new TextBox
+            _newTag = SearchBox.PlainTextBox(Look.Font(9), "New tag…");
+            _newTag.AddHandler(KeyDownEvent, (_, e) =>
             {
-                BorderStyle = BorderStyle.None,
-                BackColor = Theme.Field,
-                ForeColor = Theme.Text,
-                Font = Theme.Font(9f),
-                PlaceholderText = "New tag\u2026"
-            };
-            _newTag.KeyDown += (_, e) =>
-            {
-                if (e.KeyCode != Keys.Enter) return;
-                e.SuppressKeyPress = true;
-                string tag = _newTag.Text.Trim();
+                if (e.Key != Key.Enter) return;
+                e.Handled = true;
+                string tag = (_newTag.Text ?? "").Trim();
                 if (tag.Length == 0) return;
                 _filter.Include.Add(tag);
                 _newTag.Clear();
-                _list.Invalidate();
-                Invalidate();
+                _list.InvalidateVisual();
+                _surface.InvalidateVisual();
                 FilterChanged?.Invoke();
-            };
-            _newTag.GotFocus += (_, _) => Invalidate(_newTagField);
-            _newTag.LostFocus += (_, _) => Invalidate(_newTagField);
-            Controls.Add(_newTag);
+            }, RoutingStrategies.Tunnel);
+            _newTag.GotFocus += (_, _) => _surface.InvalidateVisual();
+            _newTag.LostFocus += (_, _) => _surface.InvalidateVisual();
+            _surface.Add(_newTag);
         }
-
 
         _list.FilterChanged += () =>
         {
-            Invalidate();
+            _surface.InvalidateVisual();
             FilterChanged?.Invoke();
         };
         _list.FavoriteToggled += tag => FavoriteToggled?.Invoke(tag);
 
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        AutomationProperties.SetName(_list, "Store tags");
+        Content = _surface;
+
+        // Escape closes from anywhere in the popup, the new-tag box included.
+        AddHandler(KeyDownEvent, (_, e) =>
+        {
+            if (e.Key != Key.Escape) return;
+            e.Handled = true;
+            Close();
+        }, RoutingStrategies.Tunnel);
+        Deactivated += (_, _) =>
+        {
+            // Closing inside the platform's deactivation message is risky; do it right after.
+            if (_ready) Dispatcher.UIThread.Post(Dismiss);
+        };
     }
 
     /// <summary>Places the popup under its header button, clamped to the current screen.</summary>
     public void ShowBelow(Control anchor)
     {
-        var owner = anchor.FindForm();
-        if (owner is null) return;
+        if (TopLevel.GetTopLevel(anchor) is not Window owner) return;
 
-        var area = Screen.FromControl(anchor).WorkingArea;
-        int gap = (int)Math.Round(7f * _scale);
+        var (area, scaling) = ScreenArea(owner, anchor);
+        const double gap = 7;
+        FitHeight(area);
 
-        int maxHeight = area.Height - (int)Math.Round(32f * _scale);
-        if (Height > maxHeight) Height = Math.Max((int)Math.Round(220f * _scale), maxHeight);
-
-        var buttonTopLeft = anchor.PointToScreen(Point.Empty);
-        int x = buttonTopLeft.X;
-        int y = buttonTopLeft.Y + anchor.Height + gap;
+        var buttonTopLeft = anchor.PointToScreen(new Point(0, 0));
+        double buttonX = buttonTopLeft.X / scaling, buttonY = buttonTopLeft.Y / scaling;
+        double x = buttonX;
+        double y = buttonY + anchor.Bounds.Height + gap;
 
         x = Math.Clamp(x, area.Left + 8, Math.Max(area.Left + 8, area.Right - Width - 8));
         if (y + Height > area.Bottom - 8)
         {
-            int above = buttonTopLeft.Y - gap - Height;
+            double above = buttonY - gap - Height;
             y = above >= area.Top + 8
                 ? above
                 : Math.Max(area.Top + 8, area.Bottom - Height - 8);
         }
 
-        Location = new Point(x, y);
-        Show(owner);
-        Activate();
+        ShowAt(owner, x, y, scaling);
     }
 
     /// <summary>Places the popup over the middle of <paramref name="owner"/>, clamped to its screen.</summary>
-    public void ShowCentered(Form owner)
+    public void ShowCentered(Window owner)
     {
-        var area = Screen.FromControl(owner).WorkingArea;
-        int maxHeight = area.Height - (int)Math.Round(32f * _scale);
-        if (Height > maxHeight) Height = Math.Max((int)Math.Round(220f * _scale), maxHeight);
+        var (area, scaling) = ScreenArea(owner, owner);
+        FitHeight(area);
 
-        var bounds = owner.Bounds;
-        int x = Math.Clamp(bounds.Left + (bounds.Width - Width) / 2, area.Left + 8, Math.Max(area.Left + 8, area.Right - Width - 8));
-        int y = Math.Clamp(bounds.Top + (bounds.Height - Height) / 2, area.Top + 8, Math.Max(area.Top + 8, area.Bottom - Height - 8));
-        Location = new Point(x, y);
+        // The owner's outer bounds, title bar included, as WinForms' Form.Bounds.
+        var frame = owner.FrameSize ?? owner.ClientSize;
+        var bounds = new Rect(owner.Position.X / scaling, owner.Position.Y / scaling, frame.Width, frame.Height);
+        double x = Math.Clamp(bounds.Left + (bounds.Width - Width) / 2, area.Left + 8, Math.Max(area.Left + 8, area.Right - Width - 8));
+        double y = Math.Clamp(bounds.Top + (bounds.Height - Height) / 2, area.Top + 8, Math.Max(area.Top + 8, area.Bottom - Height - 8));
+        ShowAt(owner, x, y, scaling);
+    }
+
+    /// <summary>The working area of the screen showing <paramref name="visual"/>, in device-independent units, and its scaling.</summary>
+    private static (Rect Area, double Scaling) ScreenArea(Window owner, Visual visual)
+    {
+        var screen = owner.Screens?.ScreenFromVisual(visual) ?? owner.Screens?.Primary;
+        if (screen is null) return (new Rect(-100000, -100000, 200000, 200000), owner.RenderScaling);
+        double scaling = screen.Scaling;
+        var area = screen.WorkingArea;
+        return (new Rect(area.X / scaling, area.Y / scaling, area.Width / scaling, area.Height / scaling), scaling);
+    }
+
+    private void FitHeight(Rect area)
+    {
+        double maxHeight = area.Height - 32;
+        if (Height > maxHeight) Height = Math.Max(220, maxHeight);
+    }
+
+    private void ShowAt(Window owner, double x, double y, double scaling)
+    {
+        _owner = owner;
+        Position = new PixelPoint((int)Math.Round(x * scaling), (int)Math.Round(y * scaling));
+        // A click elsewhere in the owner closes the popup even where the window manager doesn't move activation.
+        owner.AddHandler(PointerPressedEvent, OnOwnerPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
         Show(owner);
         Activate();
     }
 
-    /// <summary>Right edge of the header's free space: left of the Blob style's mascot.</summary>
-    private float HeaderRight()
+    private void OnOwnerPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        float right = ClientSize.Width - _side;
+        if (_ready) Dismiss();
+    }
+
+    private void Dismiss()
+    {
+        if (!_closing) Close();
+    }
+
+    /// <summary>Scrolls the tag list by wheel notches.</summary>
+    public void ScrollByWheel(double notches) => _list.ScrollByWheel(notches);
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        _ready = true;
+        _list.Focus();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _closing = true;
+        _owner?.RemoveHandler(PointerPressedEvent, OnOwnerPointerPressed);
+        _owner = null;
+        base.OnClosed(e);
+    }
+
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        base.OnPointerWheelChanged(e);
+        // The list scrolls too and leaves the event unhandled, so a notch over it scrolls twice, as in WinForms.
+        ScrollByWheel(e.Delta.Y);
+        e.Handled = true;
+    }
+
+    /// <summary>Right edge of the header's free space: left of the Blob style's mascot.</summary>
+    private double HeaderRight(double width)
+    {
+        double right = width - Side;
         if (Mascots.For(MascotSpot.TagMenu) is { } blob)
-            right -= Mascots.WidthAt(blob, 50f * _scale) + 10f * _scale;
+            right -= Mascots.WidthAt(blob, 50) + 10;
         return right;
     }
 
@@ -175,173 +242,216 @@ internal sealed class TagFilterPopup : Form
     private bool HasClearable =>
         _picking is null ? !_filter.IsEmpty : _filter.Include.Any(tag => !_picking.Locked.Contains(tag));
 
-    protected override void OnLayout(LayoutEventArgs levent)
+    /// <summary>The rounded field the new-tag box sits in (picking only).</summary>
+    private Rect NewTagField(double width) => new(Math.Floor(HeaderRight(width)) - 170, 14, 170, 26);
+
+    /// <summary>The Clear button, left of the mascot and the new-tag field; empty when there is nothing to clear.</summary>
+    private Rect ClearRect(double width)
     {
-        base.OnLayout(levent);
-        if (_newTag is null) return;
-        // Borderless text box inside a rounded field painted in OnPaint.
-        int w = (int)Math.Round(170f * _scale), h = (int)Math.Round(26f * _scale), pad = (int)Math.Round(9f * _scale);
-        _newTagField = new Rectangle((int)HeaderRight() - w, (int)Math.Round(14f * _scale), w, h);
-        int textHeight = _newTag.PreferredHeight;
-        _newTag.SetBounds(_newTagField.X + pad, _newTagField.Y + (h - textHeight) / 2 + 1, w - pad * 2, textHeight);
+        if (!HasClearable) return default;
+        double right = _newTag is null ? HeaderRight(width) : NewTagField(width).Left - 10;
+        return new Rect(Math.Floor(right) - 64, 14, 64, 26);
     }
 
-    public void ScrollByWheel(int delta) => _list.ScrollByWheel(delta);
-
-    protected override void OnShown(EventArgs e)
+    private void ClearTags()
     {
-        base.OnShown(e);
-        _ready = true;
-        _list.Focus();
+        if (_picking is null) _filter.Clear();
+        else _filter.Include.RemoveWhere(tag => !_picking.Locked.Contains(tag));
+        _clearHover = false;
+        _list.InvalidateVisual();
+        _surface.InvalidateVisual();
+        FilterChanged?.Invoke();
     }
 
-    protected override void OnDeactivate(EventArgs e)
+    /// <summary>Where the list goes (the WinForms padding: the header above, a one-pixel border around) and the new-tag box.</summary>
+    private (Rect List, Rect NewTag) ChildRects(Size size)
     {
-        base.OnDeactivate(e);
-        if (_ready && !IsDisposed) Close();
+        var list = new Rect(1, HeaderHeight, Math.Max(0, size.Width - 2), Math.Max(0, size.Height - HeaderHeight - 1));
+        // A borderless text box inside the rounded field painted below.
+        var field = NewTagField(size.Width);
+        const double pad = 9;
+        return (list, new Rect(field.X + pad, field.Y + 2, field.Width - pad * 2, field.Height - 2));
     }
 
-    protected override void OnMouseWheel(MouseEventArgs e)
+    private void Paint(DrawingContext g, Size size)
     {
-        ScrollByWheel(e.Delta);
-        base.OnMouseWheel(e);
-    }
+        double width = size.Width, height = size.Height;
+        g.FillRectangle(Look.Brush(Look.MenuBg), new Rect(size));
 
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        bool hover = _clearRect.Contains(e.Location);
-        if (hover != _clearHover)
-        {
-            _clearHover = hover;
-            Invalidate(_clearRect);
-        }
-        Cursor = hover ? Cursors.Hand : Cursors.Default;
-        base.OnMouseMove(e);
-    }
-
-    protected override void OnMouseClick(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left && _clearRect.Contains(e.Location) && HasClearable)
-        {
-            if (_picking is null) _filter.Clear();
-            else _filter.Include.RemoveWhere(tag => !_picking.Locked.Contains(tag));
-            _clearHover = false;
-            _list.Invalidate();
-            Invalidate();
-            FilterChanged?.Invoke();
-            return;
-        }
-        base.OnMouseClick(e);
-    }
-
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-    {
-        if (keyData == Keys.Escape)
-        {
-            Close();
-            return true;
-        }
-        return base.ProcessCmdKey(ref msg, keyData);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-        var header = new RectangleF(_side, (int)Math.Round(14f * _scale),
-            ClientSize.Width - _side * 2f, (int)Math.Round(22f * _scale));
-        Theme.DrawText(g, _picking is null ? "TAGS" : "ADD TAGS", _captionFont, Theme.Text, header);
+        var header = new Rect(Side, 14, Math.Max(1, width - Side * 2), 22);
+        Look.DrawText(g, _picking is null ? "TAGS" : "ADD TAGS", CaptionFont, Look.Text, header);
 
         // Blob style: a blob peeks over the header divider on the right.
-        float headerRight = ClientSize.Width - _side;
+        double headerRight = width - Side;
         if (Mascots.For(MascotSpot.TagMenu) is { } blob)
         {
-            float blobHeight = 50f * _scale;
-            float blobX = headerRight - Mascots.WidthAt(blob, blobHeight);
-            Mascots.Draw(g, blob, blobX, _headerHeight - 1, blobHeight);
-            headerRight = blobX - 10f * _scale;
+            const double blobHeight = 50;
+            double blobX = headerRight - Mascots.WidthAt(blob, blobHeight);
+            Mascots.Draw(g, blob, blobX, HeaderHeight - 1, blobHeight);
+            headerRight = blobX - 10;
         }
+
+        // WinForms drew the whole-pixel shapes below with crisp outlines; half a pixel in keeps them crisp here.
+        var half = new Vector(0.5, 0.5);
 
         // Picking: the new-tag box sits at the right, the Clear button left of it.
         if (_newTag is not null)
         {
-            using var fieldPath = Theme.Rounded(_newTagField, 6f * _scale);
-            using var fieldFill = new SolidBrush(Theme.Field);
-            using var fieldBorder = new Pen(_newTag.Focused ? Theme.CardBorderHover : Theme.FieldBorder, 1f);
-            g.FillPath(fieldFill, fieldPath);
-            g.DrawPath(fieldBorder, fieldPath);
-            headerRight = _newTagField.Left - 10f * _scale;
+            var field = NewTagField(width);
+            g.DrawRectangle(Look.Brush(Look.Field), Look.Pen(_newTag.IsFocused ? Look.CardBorderHover : Look.FieldBorder, 1),
+                Look.Rounded(field.Translate(half), 6));
+            headerRight = field.Left - 10;
         }
 
-        _clearRect = Rectangle.Empty;
-        if (HasClearable)
+        var clear = ClearRect(width);
+        if (clear.Width > 0)
         {
-            int w = (int)Math.Round(64f * _scale), h = (int)Math.Round(26f * _scale);
-            _clearRect = new Rectangle((int)headerRight - w, (int)Math.Round(14f * _scale), w, h);
-            using var path = Theme.Rounded(_clearRect, 6f * _scale);
-            using var fill = new SolidBrush(_clearHover ? Theme.FieldHover : Theme.Field);
-            using var clearBorder = new Pen(_clearHover ? Theme.CardBorderHover : Theme.FieldBorder, 1f);
-            g.FillPath(fill, path);
-            g.DrawPath(clearBorder, path);
-            Theme.DrawText(g, "Clear", _subtitleFont, _clearHover ? Theme.Text : Theme.TextMuted, _clearRect,
-                StringAlignment.Center);
+            g.DrawRectangle(Look.Brush(_clearHover ? Look.FieldHover : Look.Field),
+                Look.Pen(_clearHover ? Look.CardBorderHover : Look.FieldBorder, 1), Look.Rounded(clear.Translate(half), 6));
+            Look.DrawText(g, "Clear", SubtitleFont, _clearHover ? Look.Text : Look.TextMuted, clear, TextAlignment.Center);
         }
 
         string subtitleText = _picking is not null
-            ? $"{_picking.GameName} \u00b7 click a tag to add or remove it \u00b7 its DLsite tags stay on"
+            ? $"{_picking.GameName} · click a tag to add or remove it · its DLsite tags stay on"
             : _filter.IsEmpty
-                ? "Click to show \u00b7 click again to hide \u00b7 right-click to pin"
-                : $"{_filter.Include.Count} shown \u00b7 {_filter.Exclude.Count} hidden";
-        float subtitleWidth = headerRight - _side - (_clearRect.IsEmpty ? 0 : _clearRect.Width + 10f * _scale);
-        var subtitle = new RectangleF(_side, (int)Math.Round(36f * _scale), subtitleWidth, (int)Math.Round(18f * _scale));
-        Theme.DrawText(g, subtitleText, _subtitleFont, Theme.TextDim, subtitle,
-            StringAlignment.Near, StringAlignment.Near, StringTrimming.EllipsisCharacter);
+                ? "Click to show · click again to hide · right-click to pin"
+                : $"{_filter.Include.Count} shown · {_filter.Exclude.Count} hidden";
+        double subtitleWidth = headerRight - Side - (clear.Width > 0 ? clear.Width + 10 : 0);
+        Look.DrawText(g, subtitleText, SubtitleFont, Look.TextDim, new Rect(Side, 36, Math.Max(1, subtitleWidth), 18),
+            TextAlignment.Left, TextLine.Top);
 
-        using var border = new Pen(Theme.FieldBorder, 1f);
-        g.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-        using var divider = new Pen(Theme.Divider, 1f);
-        g.DrawLine(divider, _side, _headerHeight - 1, ClientSize.Width - _side, _headerHeight - 1);
-
-        base.OnPaint(e);
+        g.DrawRectangle(Look.Pen(Look.FieldBorder, 1), new Rect(0.5, 0.5, width - 1, height - 1));
+        g.DrawLine(Look.Pen(Look.Divider, 1), new Point(Side, HeaderHeight - 0.5), new Point(width - Side, HeaderHeight - 0.5));
     }
 
-    protected override void Dispose(bool disposing)
+    /// <summary>The popup's content: paints the header and border under the tag list and the new-tag box.</summary>
+    private sealed class Surface : Control, ICustomHitTest
     {
-        if (disposing)
+        private readonly TagFilterPopup _popup;
+        private readonly Cursor _hand = new(StandardCursorType.Hand);
+        private bool _pressed;
+
+        public Surface(TagFilterPopup popup)
         {
-            _captionFont.Dispose();
-            _subtitleFont.Dispose();
+            _popup = popup;
         }
-        base.Dispose(disposing);
+
+        public void Add(Control child)
+        {
+            VisualChildren.Add(child);
+            LogicalChildren.Add(child);
+        }
+
+        public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            var size = new Size(double.IsInfinity(availableSize.Width) ? PopupWidth : availableSize.Width,
+                double.IsInfinity(availableSize.Height) ? HeaderHeight : availableSize.Height);
+            var (list, newTag) = _popup.ChildRects(size);
+            _popup._list.Measure(list.Size);
+            _popup._newTag?.Measure(newTag.Size);
+            return size;
+        }
+
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            var (list, newTag) = _popup.ChildRects(finalSize);
+            _popup._list.Arrange(list);
+            _popup._newTag?.Arrange(newTag);
+            return finalSize;
+        }
+
+        public override void Render(DrawingContext g) => _popup.Paint(g, Bounds.Size);
+
+        protected override void OnPointerMoved(PointerEventArgs e)
+        {
+            base.OnPointerMoved(e);
+            if (!ReferenceEquals(e.Source, this)) return;
+            var clear = _popup.ClearRect(Bounds.Width);
+            bool hover = clear.Width > 0 && clear.Contains(e.GetPosition(this));
+            if (hover != _popup._clearHover)
+            {
+                _popup._clearHover = hover;
+                InvalidateVisual();
+            }
+            Cursor = hover ? _hand : Cursor.Default;
+        }
+
+        protected override void OnPointerExited(PointerEventArgs e)
+        {
+            base.OnPointerExited(e);
+            if (!_popup._clearHover) return;
+            _popup._clearHover = false;
+            InvalidateVisual();
+        }
+
+        protected override void OnPointerPressed(PointerPressedEventArgs e)
+        {
+            base.OnPointerPressed(e);
+            if (!ReferenceEquals(e.Source, this)) return;
+            e.Handled = true;
+            if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+            _pressed = true;
+            e.Pointer.Capture(this);
+        }
+
+        protected override void OnPointerReleased(PointerReleasedEventArgs e)
+        {
+            base.OnPointerReleased(e);
+            if (e.InitialPressMouseButton != MouseButton.Left || !_pressed) return;
+            _pressed = false;
+            e.Pointer.Capture(null);
+            e.Handled = true;
+            var point = e.GetPosition(this);
+            if (_popup.ClearRect(Bounds.Width).Contains(point) && _popup.HasClearable) _popup.ClearTags();
+        }
+
+        protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
+        {
+            base.OnPointerCaptureLost(e);
+            _pressed = false;
+        }
     }
 }
 
-internal sealed class TagList : Control
+/// <summary>The scrolling chips of the tag popup, grouped under headers.</summary>
+internal sealed class TagList : Control, ICustomHitTest
 {
-    private sealed record ChipLayout(TagChipInfo Info, RectangleF Bounds, float CountWidth);
+    private sealed record ChipLayout(TagChipInfo Info, Rect Bounds, double CountWidth);
+
+    private const double SideMargin = 18;
+    private const double ScrollReserve = 18;
+    private const double ChipHeight = 31;
+    private const double ChipGap = 8;
+    private const double RowGap = 8;
+    private const double GroupHeaderHeight = 25;
+    private const double GroupGap = 13;
+    private const double ChipPad = 12;
+    private const double NameGap = 7;
+    private const double StarSpace = 15;
+
+    private static readonly UiFont GroupFont = Look.Font(7.8, bold: true);
+    private static readonly UiFont ChipFont = Look.Font(9.2);
+    private static readonly UiFont CountFont = Look.Font(8, bold: true);
 
     private IReadOnlyList<TagGroupInfo> _groups;
     private readonly TagFilter _filter;
     private readonly TagPicking? _picking;
-    private readonly float _scale;
-    private readonly Font _groupFont = Theme.Font(7.8f, FontStyle.Bold);
-    private readonly Font _chipFont = Theme.Font(9.2f);
-    private readonly Font _countFont = Theme.Font(8f, FontStyle.Bold);
+    private readonly Cursor _hand = new(StandardCursorType.Hand);
 
     private readonly List<ChipLayout> _chips = new();
-    private readonly List<(string Title, float Y, float TextWidth)> _groupHeaders = new();
+    private readonly List<(string Title, double Y, double TextWidth)> _groupHeaders = new();
 
-    private int _contentHeight;
-    private int _scroll;
-    private int _maxScroll;
+    private double _contentHeight;
+    private double _scroll;
+    private double _maxScroll;
     private ChipLayout? _hoverChip;
+    private bool _pressed;
     private bool _dragging;
     private bool _dragged;
-    private bool _captured;
-    private int _dragStartY;
-    private int _dragStartScroll;
+    private double _dragStartY;
+    private double _dragStartScroll;
 
     public event Action? FilterChanged;
     public event Action<string>? FavoriteToggled;
@@ -349,119 +459,104 @@ internal sealed class TagList : Control
     public void SetGroups(IReadOnlyList<TagGroupInfo> groups)
     {
         _groups = groups;
-        Relayout(Width);
-        Invalidate();
+        Relayout(Bounds.Width);
+        InvalidateVisual();
     }
 
-    public TagList(IReadOnlyList<TagGroupInfo> groups, TagFilter filter, float scale, TagPicking? picking = null)
+    public TagList(IReadOnlyList<TagGroupInfo> groups, TagFilter filter, TagPicking? picking = null)
     {
         _groups = groups;
         _filter = filter;
         _picking = picking;
-        _scale = scale;
-
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.MenuBg;
-        TabStop = false;
-        Cursor = Cursors.Default;
-        AccessibleName = "Store tags";
-
-        Relayout(Width);
+        Focusable = true;
+        IsTabStop = false;
+        FocusAdorner = null;
+        ClipToBounds = true;
+        Cursor = Cursor.Default;
+        Relayout(Bounds.Width);
     }
 
-    public int ContentHeight => _contentHeight;
+    public double ContentHeight => _contentHeight;
 
-    public int Measure(int width)
+    /// <summary>Lays the chips out for <paramref name="width"/> and returns the height they need.</summary>
+    public double MeasureContent(double width)
     {
         Relayout(width);
         return _contentHeight;
     }
 
-    public void ScrollByWheel(int delta)
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    public void ScrollByWheel(double notches)
     {
-        if (_maxScroll <= 0 || delta == 0) return;
-        int step = (int)Math.Round(delta / 120f * 78f * _scale);
-        if (step == 0) step = Math.Sign(delta) * 12;
+        if (_maxScroll <= 0 || notches == 0) return;
+        double step = Math.Round(notches * 78);
+        if (step == 0) step = Math.Sign(notches) * 12;
         _scroll = Math.Clamp(_scroll - step, 0, _maxScroll);
-        Invalidate();
+        InvalidateVisual();
     }
 
-    protected override void OnResize(EventArgs e)
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
-        base.OnResize(e);
-        Relayout(Width);
-        Invalidate();
+        base.OnSizeChanged(e);
+        Relayout(e.NewSize.Width);
+        InvalidateVisual();
     }
 
-    private void Relayout(int width)
+    private void Relayout(double width)
     {
         _chips.Clear();
         _groupHeaders.Clear();
 
-        float side = 18f * _scale;
-        float scrollReserve = 18f * _scale;
-        float chipHeight = 31f * _scale;
-        float chipGap = 8f * _scale;
-        float rowGap = 8f * _scale;
-        float headerHeight = 25f * _scale;
-        float groupGap = 13f * _scale;
-        float wrapWidth = Math.Max(80f, width - side * 2f - scrollReserve);
+        double wrapWidth = Math.Max(80, width - SideMargin * 2 - ScrollReserve);
 
-        float y = 5f * _scale;
+        double y = 5;
         foreach (var group in _groups)
         {
             if (group.Tags.Count == 0) continue;
-            if (_groupHeaders.Count > 0) y += groupGap;
+            if (_groupHeaders.Count > 0) y += GroupGap;
 
-            _groupHeaders.Add((group.Title, y, MeasureText(group.Title, _groupFont)));
-            y += headerHeight;
+            _groupHeaders.Add((group.Title, y, MeasureText(group.Title, GroupFont)));
+            y += GroupHeaderHeight;
 
-            float x = side;
+            double x = SideMargin;
             bool rowHasChip = false;
             foreach (var chip in group.Tags)
             {
-                float countWidth = MeasureText(chip.Count.ToString(), _countFont) + 2f * _scale;
-                float chipWidth = MeasureChip(chip, countWidth);
-                if (rowHasChip && x + chipWidth > side + wrapWidth)
+                double countWidth = MeasureText(chip.Count.ToString(), CountFont) + 2;
+                double chipWidth = MeasureChip(chip, countWidth);
+                if (rowHasChip && x + chipWidth > SideMargin + wrapWidth)
                 {
-                    x = side;
-                    y += chipHeight + rowGap;
+                    x = SideMargin;
+                    y += ChipHeight + RowGap;
                 }
 
-                _chips.Add(new ChipLayout(chip, new RectangleF(x, y, chipWidth, chipHeight), countWidth));
-                x += chipWidth + chipGap;
+                _chips.Add(new ChipLayout(chip, new Rect(x, y, chipWidth, ChipHeight), countWidth));
+                x += chipWidth + ChipGap;
                 rowHasChip = true;
             }
 
-            y += chipHeight;
+            y += ChipHeight;
         }
 
-        _contentHeight = (int)Math.Ceiling(y + 10f * _scale);
-        _maxScroll = Math.Max(0, _contentHeight - Height);
+        _contentHeight = Math.Ceiling(y + 10);
+        _maxScroll = Math.Max(0, _contentHeight - Bounds.Height);
         _scroll = Math.Clamp(_scroll, 0, _maxScroll);
         _hoverChip = null;
     }
 
-    private float MeasureChip(TagChipInfo chip, float countWidth)
+    private static double MeasureChip(TagChipInfo chip, double countWidth)
     {
-        float nameWidth = MeasureText(chip.Name, _chipFont) + (chip.Favorite ? StarSpace : 0f);
-        float gap = 7f * _scale;
-        // Slack for GDI+ DrawString's internal padding, so names don't ellipsize early.
-        return (int)Math.Ceiling(12f * _scale * 2f + nameWidth + gap + countWidth + 10f * _scale);
+        double nameWidth = MeasureText(chip.Name, ChipFont) + (chip.Favorite ? StarSpace : 0);
+        // The WinForms slack for GDI+ text padding, kept so chips have the same sizes.
+        return Math.Ceiling(ChipPad * 2 + nameWidth + NameGap + countWidth + 10);
     }
 
-    private float StarSpace => 15f * _scale;
-
-    private float MeasureText(string text, Font font)
-    {
-        return TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue),
-            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
-    }
+    private static double MeasureText(string text, UiFont font) => Math.Ceiling(Look.Measure(text, font).Width);
 
     private ChipLayout? ChipAt(Point point)
     {
-        var contentPoint = new PointF(point.X, point.Y + _scroll);
+        var contentPoint = new Point(point.X, point.Y + _scroll);
         for (int i = _chips.Count - 1; i >= 0; i--)
         {
             if (_chips[i].Bounds.Contains(contentPoint)) return _chips[i];
@@ -469,169 +564,155 @@ internal sealed class TagList : Control
         return null;
     }
 
-    private RectangleF ScrollThumb()
+    private Rect ScrollThumb()
     {
-        if (_maxScroll <= 0) return RectangleF.Empty;
-        float top = 6f * _scale;
-        float track = Math.Max(1f, Height - 12f * _scale);
-        float thumbHeight = Math.Max(26f * _scale, track * Height / Math.Max(1f, _contentHeight));
-        float progress = _maxScroll == 0 ? 0f : (float)_scroll / _maxScroll;
-        float y = top + progress * Math.Max(0f, track - thumbHeight);
-        return new RectangleF(Width - 10f * _scale, y, 4f * _scale, thumbHeight);
+        if (_maxScroll <= 0) return default;
+        double height = Bounds.Height;
+        const double top = 6;
+        double track = Math.Max(1, height - 12);
+        double thumbHeight = Math.Max(26, track * height / Math.Max(1, _contentHeight));
+        double progress = _scroll / _maxScroll;
+        double y = top + progress * Math.Max(0, track - thumbHeight);
+        return new Rect(Bounds.Width - 10, y, 4, thumbHeight);
     }
 
-    private bool InScrollbar(Point point)
-    {
-        if (_maxScroll <= 0) return false;
-        var thumb = ScrollThumb();
-        var hit = RectangleF.Inflate(thumb, 5f * _scale, 1f);
-        return hit.Contains(point);
-    }
+    private bool InScrollbar(Point point) =>
+        _maxScroll > 0 && ScrollThumb().Inflate(new Thickness(5, 1)).Contains(point);
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPointerMoved(PointerEventArgs e)
     {
+        base.OnPointerMoved(e);
+        var point = e.GetPosition(this);
         if (_dragging)
         {
-            int delta = e.Y - _dragStartY;
+            double delta = point.Y - _dragStartY;
             if (Math.Abs(delta) > 2) _dragged = true;
-            float track = Math.Max(1f, Height - 12f * _scale - ScrollThumb().Height);
-            _scroll = Math.Clamp(
-                (int)Math.Round(_dragStartScroll + delta * _maxScroll / track),
-                0, _maxScroll);
-            Invalidate();
-            Cursor = Cursors.Default;
-            base.OnMouseMove(e);
+            double track = Math.Max(1, Bounds.Height - 12 - ScrollThumb().Height);
+            _scroll = Math.Clamp(Math.Round(_dragStartScroll + delta * _maxScroll / track), 0, _maxScroll);
+            InvalidateVisual();
+            Cursor = Cursor.Default;
             return;
         }
 
-        var chip = ChipAt(e.Location);
+        var chip = ChipAt(point);
         if (!ReferenceEquals(chip, _hoverChip))
         {
             _hoverChip = chip;
-            Invalidate();
+            InvalidateVisual();
         }
 
         bool clickable = chip is not null && _picking?.Locked.Contains(chip.Info.Name) != true;
-        Cursor = clickable || InScrollbar(e.Location) ? Cursors.Hand : Cursors.Default;
-        base.OnMouseMove(e);
+        Cursor = clickable || InScrollbar(point) ? _hand : Cursor.Default;
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnPointerExited(PointerEventArgs e)
     {
-        if (!_dragging)
-        {
-            _hoverChip = null;
-            Cursor = Cursors.Default;
-            Invalidate();
-        }
-        base.OnMouseLeave(e);
+        base.OnPointerExited(e);
+        if (_dragging) return;
+        _hoverChip = null;
+        Cursor = Cursor.Default;
+        InvalidateVisual();
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
+        base.OnPointerPressed(e);
         Focus();
-        if (e.Button == MouseButtons.Left && InScrollbar(e.Location))
+        e.Handled = true;
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        // WinForms captured the mouse on every press; a click is a press and a release over the list.
+        _pressed = true;
+        e.Pointer.Capture(this);
+        var point = e.GetPosition(this);
+        if (InScrollbar(point))
         {
             _dragging = true;
             _dragged = false;
-            _captured = true;
-            _dragStartY = e.Y;
+            _dragStartY = point.Y;
             _dragStartScroll = _scroll;
-            Capture = true;
         }
-        base.OnMouseDown(e);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
-        if (_captured)
+        base.OnPointerReleased(e);
+        e.Handled = true;
+        var point = e.GetPosition(this);
+        if (e.InitialPressMouseButton == MouseButton.Right)
         {
-            _captured = false;
-            Capture = false;
-            _dragging = false;
+            if (!_dragging && ChipAt(point) is { } pinned) FavoriteToggled?.Invoke(pinned.Info.Name);
+            return;
         }
-        else if (e.Button == MouseButtons.Right && ChipAt(e.Location) is { } chip)
+        if (e.InitialPressMouseButton != MouseButton.Left || !_pressed) return;
+        _pressed = false;
+        bool dragging = _dragging;
+        _dragging = false;
+        e.Pointer.Capture(null);
+        if (dragging) InvalidateVisual();
+        if (new Rect(Bounds.Size).Contains(point)) Click(point);
+    }
+
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
+    {
+        base.OnPointerCaptureLost(e);
+        _pressed = false;
+        if (!_dragging) return;
+        _dragging = false;
+        InvalidateVisual();
+    }
+
+    private void Click(Point point)
+    {
+        if (_dragged)
         {
-            FavoriteToggled?.Invoke(chip.Info.Name);
+            _dragged = false;
+            return;
         }
-        base.OnMouseUp(e);
-    }
 
-    protected override void OnMouseCaptureChanged(EventArgs e)
-    {
-        if (!Capture)
+        var chip = ChipAt(point);
+        if (chip is null) return;
+        string name = chip.Info.Name;
+        if (_picking is not null)
         {
-            _captured = false;
-            _dragging = false;
+            if (_picking.Locked.Contains(name)) return;
+            if (!_filter.Include.Remove(name)) _filter.Include.Add(name);
         }
-        base.OnMouseCaptureChanged(e);
-    }
-
-    protected override void OnMouseClick(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
+        else
         {
-            if (_dragged)
-            {
-                _dragged = false;
-                base.OnMouseClick(e);
-                return;
-            }
-
-            var chip = ChipAt(e.Location);
-            if (chip is not null && _picking is not null)
-            {
-                string name = chip.Info.Name;
-                if (_picking.Locked.Contains(name)) return;
-                if (!_filter.Include.Remove(name)) _filter.Include.Add(name);
-                Invalidate();
-                FilterChanged?.Invoke();
-                return;
-            }
-            if (chip is not null)
-            {
-                _filter.Cycle(chip.Info.Name);
-                Invalidate();
-                FilterChanged?.Invoke();
-                return;
-            }
+            _filter.Cycle(name);
         }
-        base.OnMouseClick(e);
+        InvalidateVisual();
+        FilterChanged?.Invoke();
     }
 
-    protected override void OnMouseWheel(MouseEventArgs e)
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
-        ScrollByWheel(e.Delta);
-        base.OnMouseWheel(e);
-    }
-
-    protected override bool IsInputKey(Keys keyData)
-    {
-        return keyData is Keys.Up or Keys.Down or Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End ||
-            base.IsInputKey(keyData);
+        base.OnPointerWheelChanged(e);
+        // Left unhandled: the popup scrolls again, as the WinForms form did when the list passed the wheel on.
+        ScrollByWheel(e.Delta.Y);
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        int page = Math.Max((int)Math.Round(220f * _scale), 1);
-        switch (e.KeyCode)
+        const double page = 220;
+        switch (e.Key)
         {
-            case Keys.Up:
-                _scroll = Math.Max(0, _scroll - (int)Math.Round(38f * _scale));
+            case Key.Up:
+                _scroll = Math.Max(0, _scroll - 38);
                 break;
-            case Keys.Down:
-                _scroll = Math.Min(_maxScroll, _scroll + (int)Math.Round(38f * _scale));
+            case Key.Down:
+                _scroll = Math.Min(_maxScroll, _scroll + 38);
                 break;
-            case Keys.PageUp:
+            case Key.PageUp:
                 _scroll = Math.Max(0, _scroll - page);
                 break;
-            case Keys.PageDown:
+            case Key.PageDown:
                 _scroll = Math.Min(_maxScroll, _scroll + page);
                 break;
-            case Keys.Home:
+            case Key.Home:
                 _scroll = 0;
                 break;
-            case Keys.End:
+            case Key.End:
                 _scroll = _maxScroll;
                 break;
             default:
@@ -640,143 +721,107 @@ internal sealed class TagList : Control
         }
 
         e.Handled = true;
-        Invalidate();
+        InvalidateVisual();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    public override void Render(DrawingContext g)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        double width = Bounds.Width, height = Bounds.Height;
+        g.FillRectangle(Look.Brush(Look.MenuBg), new Rect(Bounds.Size));
 
-        var state = g.Save();
-        g.SetClip(ClientRectangle);
-        g.TranslateTransform(0, -_scroll);
-
-        float side = 18f * _scale;
-        float scrollReserve = 18f * _scale;
-
-        float viewTop = _scroll;
-        float viewBottom = _scroll + Height;
-
-        foreach (var (title, headerY, textWidth) in _groupHeaders)
+        using (g.PushClip(new Rect(Bounds.Size)))
+        using (g.PushTransform(Matrix.CreateTranslation(0, -_scroll)))
         {
-            if (headerY + 22f * _scale < viewTop || headerY > viewBottom) continue;
-            var headerRect = new RectangleF(side, headerY, Width - side * 2f - scrollReserve,
-                22f * _scale);
-            Theme.DrawText(g, title, _groupFont, Theme.TextDim, headerRect,
-                StringAlignment.Near, StringAlignment.Center, StringTrimming.EllipsisCharacter);
+            double viewTop = _scroll;
+            double viewBottom = _scroll + height;
+            double lineRight = width - SideMargin - ScrollReserve;
 
-            float lineX = Math.Min(side + textWidth + 11f * _scale, Width - side - scrollReserve);
-            float lineY = headerY + 11f * _scale;
-            using var line = new Pen(Theme.Divider, 1f);
-            g.DrawLine(line, lineX, lineY, Width - side - scrollReserve, lineY);
+            foreach (var (title, headerY, textWidth) in _groupHeaders)
+            {
+                if (headerY + 22 < viewTop || headerY > viewBottom) continue;
+                var headerRect = new Rect(SideMargin, headerY, Math.Max(1, width - SideMargin * 2 - ScrollReserve), 22);
+                Look.DrawText(g, title, GroupFont, Look.TextDim, headerRect);
+
+                double lineX = Math.Min(SideMargin + textWidth + 11, lineRight);
+                double lineY = headerY + 11 + 0.5;
+                g.DrawLine(Look.Pen(Look.Divider, 1), new Point(lineX, lineY), new Point(lineRight, lineY));
+            }
+
+            foreach (var chip in _chips)
+            {
+                if (chip.Bounds.Bottom < viewTop || chip.Bounds.Top > viewBottom) continue;
+                DrawChip(g, chip);
+            }
         }
-
-        foreach (var chip in _chips)
-        {
-            if (chip.Bounds.Bottom < viewTop || chip.Bounds.Top > viewBottom) continue;
-            DrawChip(g, chip);
-        }
-
-        g.Restore(state);
 
         if (_maxScroll > 0) DrawScrollbar(g);
     }
 
-    private void DrawChip(Graphics g, ChipLayout chip)
+    private void DrawChip(DrawingContext g, ChipLayout chip)
     {
         bool locked = _picking?.Locked.Contains(chip.Info.Name) == true;
         bool hover = ReferenceEquals(chip, _hoverChip) && !locked;
         var state = _filter.StateOf(chip.Info.Name);
-        Color fill = state switch
+        var fill = state switch
         {
-            TagState.Include => Theme.AccentDim,
-            TagState.Exclude => Theme.DangerDim,
-            _ => hover ? Theme.FieldHover : Theme.Field
+            TagState.Include => Look.AccentDim,
+            TagState.Exclude => Look.DangerDim,
+            _ => hover ? Look.FieldHover : Look.Field
         };
-        Color border = state switch
+        var border = state switch
         {
-            TagState.Include => Theme.AccentBorder,
-            TagState.Exclude => Theme.DangerBorder,
-            _ => hover ? Theme.CardBorderHover : Theme.FieldBorder
+            TagState.Include => Look.AccentBorder,
+            TagState.Exclude => Look.DangerBorder,
+            _ => hover ? Look.CardBorderHover : Look.FieldBorder
         };
-        Color fg = state switch
+        var fg = state switch
         {
-            TagState.Include when locked => Theme.Gold,
-            TagState.Include => Theme.GoldBright,
-            TagState.Exclude => Theme.Danger,
-            _ => hover ? Theme.Text : Theme.TextMuted
+            TagState.Include when locked => Look.Gold,
+            TagState.Include => Look.GoldBright,
+            TagState.Exclude => Look.Danger,
+            _ => hover ? Look.Text : Look.TextMuted
         };
-        Color countColor = state switch
+        var countColor = state switch
         {
-            TagState.Include => Theme.Gold,
-            TagState.Exclude => Theme.Danger,
-            _ => Theme.TextDim
+            TagState.Include => Look.Gold,
+            TagState.Exclude => Look.Danger,
+            _ => Look.TextDim
         };
 
-        using (var path = Theme.Rounded(chip.Bounds, Theme.ChipRadius * _scale))
-        using (var brush = new SolidBrush(fill))
-        using (var pen = new Pen(border, 1f))
-        {
-            g.FillPath(brush, path);
-            g.DrawPath(pen, path);
-        }
+        // WinForms drew the chips on whole pixels with crisp outlines; half a pixel in keeps them crisp here.
+        var half = new Vector(0.5, 0.5);
+        var bounds = chip.Bounds;
+        g.DrawRectangle(Look.Brush(fill), Look.Pen(border, 1), Look.Rounded(bounds.Translate(half), Look.ChipRadius));
 
-        float pad = 12f * _scale;
-        float countWidth = chip.CountWidth;
-        float gap = 7f * _scale;
-        float nameLeft = chip.Bounds.Left + pad;
-
+        double nameLeft = bounds.Left + ChipPad;
         if (chip.Info.Favorite)
         {
-            float size = 10f * _scale;
-            var starRect = new RectangleF(nameLeft, chip.Bounds.Top + (chip.Bounds.Height - size) / 2f, size, size);
-            using var star = Theme.Star(starRect);
-            using var gold = new SolidBrush(Theme.Gold);
-            g.FillPath(gold, star);
+            const double size = 10;
+            var starRect = new Rect(nameLeft, bounds.Top + (bounds.Height - size) / 2, size, size);
+            g.DrawGeometry(Look.Brush(Look.Gold), null, Look.Star(starRect.Translate(half)));
             nameLeft += StarSpace;
         }
 
-        float nameWidth = Math.Max(1f, chip.Bounds.Right - pad - countWidth - gap - nameLeft);
-        var nameRect = new RectangleF(nameLeft, chip.Bounds.Top, nameWidth, chip.Bounds.Height);
-        Theme.DrawText(g, chip.Info.Name, _chipFont, fg, nameRect,
-            StringAlignment.Near, StringAlignment.Center, StringTrimming.EllipsisCharacter);
+        double nameWidth = Math.Max(1, bounds.Right - ChipPad - chip.CountWidth - NameGap - nameLeft);
+        var nameRect = new Rect(nameLeft, bounds.Top, nameWidth, bounds.Height);
+        Look.DrawText(g, chip.Info.Name, ChipFont, fg, nameRect);
         if (state == TagState.Exclude)
         {
-            float textWidth = Math.Min(nameRect.Width, MeasureText(chip.Info.Name, _chipFont));
-            float midY = nameRect.Top + nameRect.Height / 2f + 1f;
-            using var strike = new Pen(Color.FromArgb(200, Theme.Danger), 1.2f);
-            g.DrawLine(strike, nameRect.Left, midY, nameRect.Left + textWidth, midY);
+            double textWidth = Math.Min(nameRect.Width, MeasureText(chip.Info.Name, ChipFont));
+            double midY = nameRect.Top + nameRect.Height / 2 + 1 + 0.5;
+            g.DrawLine(Look.Pen(Look.Alpha(200, Look.Danger), 1.2), new Point(nameRect.Left + 0.5, midY),
+                new Point(nameRect.Left + 0.5 + textWidth, midY));
         }
 
-        // The count is measured with GDI (TextRenderer), so draw it with GDI too; GDI+ pads differently and clips digits.
-        var countRect = Rectangle.Round(new RectangleF(chip.Bounds.Right - pad - countWidth, chip.Bounds.Top,
-            countWidth, chip.Bounds.Height));
-        TextRenderer.DrawText(g, chip.Info.Count.ToString(), _countFont, countRect,
-            countColor,
-            TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
-            TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsTranslateTransform |
-            TextFormatFlags.PreserveGraphicsClipping);
+        var countRect = new Rect(bounds.Right - ChipPad - chip.CountWidth, bounds.Top, chip.CountWidth, bounds.Height);
+        Look.DrawText(g, chip.Info.Count.ToString(), CountFont, countColor, countRect, TextAlignment.Right);
     }
 
-    private void DrawScrollbar(Graphics g)
+    private void DrawScrollbar(DrawingContext g)
     {
         var thumb = ScrollThumb();
-        if (thumb.IsEmpty) return;
-        using var brush = new SolidBrush(_dragging ? Theme.ScrollThumbActive : Theme.ScrollThumb);
-        using var path = Theme.Rounded(thumb, thumb.Width / 2f);
-        g.FillPath(brush, path);
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _groupFont.Dispose();
-            _chipFont.Dispose();
-            _countFont.Dispose();
-        }
-        base.Dispose(disposing);
+        if (thumb.Width <= 0) return;
+        g.DrawRectangle(Look.Brush(_dragging ? Look.ScrollThumbActive : Look.ScrollThumb), null,
+            Look.Rounded(thumb.Translate(new Vector(0.5, 0.5)), thumb.Width / 2));
     }
 }

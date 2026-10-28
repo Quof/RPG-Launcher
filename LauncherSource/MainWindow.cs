@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Reflection;
+using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 
 namespace RpgLauncher;
 
-internal sealed class MainForm : Form
+internal sealed class MainWindow : Window
 {
     private readonly string _root;
     private readonly string _libraryPath;
@@ -20,11 +22,12 @@ internal sealed class MainForm : Form
     private readonly ViewToggle _viewToggle;
     private readonly ReleasesView _releases;
     private readonly ReleaseStore _releaseStore;
-    private readonly ToolTip _toolTips = new() { AutoPopDelay = 8000, InitialDelay = 450 };
+    private readonly ManualPanel _body = new();
+    private readonly string? _screenshot;
 
-    private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 5200 };
-    private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 500 };
-    private readonly System.Windows.Forms.Timer _searchTimer = new() { Interval = 150 };
+    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromMilliseconds(5200) };
+    private readonly DispatcherTimer _saveTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private readonly DispatcherTimer _searchTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
     private readonly Dictionary<string, int> _running = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Process> _processes = new();
 
@@ -51,6 +54,10 @@ internal sealed class MainForm : Form
     private readonly SemaphoreSlim _metadataGate = new(1, 1);
 
     private List<GameEntry> _games = new();
+    private bool _closed;
+    // The window's place and outer size while not maximized, saved on close.
+    private PixelPoint _normalPosition;
+    private PixelSize _normalSize;
     private TagFilterPopup? _tagPicker;
     private Task? _storeImageTask;
     private bool _storeImagesAgain;
@@ -81,71 +88,76 @@ internal sealed class MainForm : Form
     /// <summary>Lets screenshot mode wait for the metadata pass.</summary>
     public bool MetadataLookupsRunning => _metadataTask is { IsCompleted: false };
 
-    public MainForm(string root)
+    public MainWindow(string root, string? screenshot = null)
     {
         _root = root;
+        _screenshot = screenshot;
         _store = new LauncherStore(Path.Combine(root, "launcher-data.json"));
         _store.Load();
         // Apply the style before any control picks up its colors.
-        Theme.Apply(_store.Data.Style);
+        Look.Apply(_store.Data.Style);
         GameCard.SquareCards = _store.Data.CardShape == CardShape.Square;
         GameEntry.StoreImagesFirst = _store.Data.CardPicture == CardPicture.StoreImage;
         GameCard.GroupNames = _store.Data.Groups;
+        Shell.WineCommand = _store.Data.WineCommand ?? "wine";
         _libraryPath = Path.Combine(root, "launcher-library.json");
         GameImageLoader.CacheDirectory = Path.Combine(root, "launcher-thumbnails");
         _releaseStore = new ReleaseStore(Path.Combine(root, "launcher-dlsite"));
         string? proxyWarning = ApplyDlsiteProxy();
 
-        Text = "RPG Launcher";
-        BackColor = Theme.Bg;
-        ForeColor = Theme.Text;
-        Font = Theme.Font(9f);
-        AutoScaleMode = AutoScaleMode.None;
-        KeyPreview = true;
-        DoubleBuffered = true;
-        MinimumSize = new Size(1140, 620);
-        ClientSize = new Size(1280, 820);
-        StartPosition = FormStartPosition.CenterScreen;
+        Title = "RPG Launcher";
+        Icon = App.WindowIcon;
+        Background = Look.Brush(Look.Bg);
+        Foreground = Look.Brush(Look.Text);
+        var font = Look.Font(9);
+        FontFamily = font.Family;
+        FontSize = font.Size;
+        MinWidth = 1140;
+        MinHeight = 620;
 
-        _header = new HeaderPanel { Dock = DockStyle.Top, Height = 96 };
-        _header.Mascot = Theme.Style == UiStyle.Blob ? Mascots.Header : null;
-        _grid = new GameGrid { Dock = DockStyle.Fill };
-        _status = new StatusBar { Dock = DockStyle.Bottom, Height = 32 };
+        _header = new HeaderPanel { Mascot = Look.Style == UiStyle.Blob ? Mascots.Header : null };
+        _grid = new GameGrid();
+        _status = new StatusBar();
 
         _search = new SearchBox();
         _sortButton = new PillButton { DrawChevron = true };
         _tagsButton = new PillButton { Text = "Tags", DrawChevron = true };
         _favoritesButton = new PillButton { Text = "Favorites", ShowHeart = true };
-        _rescanButton = new PillButton { IconGlyph = "\uE72C" };
-        _moreButton = new PillButton { IconGlyph = "\uE712" };
+        _rescanButton = new PillButton { Icon = PillIcon.Refresh };
+        _moreButton = new PillButton { Icon = PillIcon.More };
         _viewToggle = new ViewToggle("Library", "New on DLsite");
         _releases = new ReleasesView(_releaseStore.CoverDirectory)
         {
-            Dock = DockStyle.Fill,
-            Visible = false,
+            IsVisible = false,
             IsOwned = id => _ownedProductIds.Contains(id),
             Tags = _releaseTagFilter
         };
 
-        _header.Controls.Add(_search);
-        _header.Controls.Add(_sortButton);
-        _header.Controls.Add(_tagsButton);
-        _header.Controls.Add(_favoritesButton);
-        _header.Controls.Add(_rescanButton);
-        _header.Controls.Add(_moreButton);
-        _header.Controls.Add(_viewToggle);
+        _header.Children.AddRange(new Control[]
+        {
+            _search, _sortButton, _tagsButton, _favoritesButton, _rescanButton, _moreButton, _viewToggle
+        });
+        _header.Layout = LayoutHeader;
 
-        Controls.Add(_grid);
-        Controls.Add(_releases);
-        Controls.Add(_status);
-        Controls.Add(_header);
+        // The header across the top, the status bar along the bottom, the library or new releases between.
+        _body.Children.AddRange(new Control[] { _grid, _releases, _status, _header });
+        _body.Layout = size =>
+        {
+            const double headerHeight = 96, statusHeight = 32;
+            double middle = Math.Max(0, size.Height - headerHeight - statusHeight);
+            _body.Place(_header, 0, 0, size.Width, headerHeight);
+            _body.Place(_grid, 0, headerHeight, size.Width, middle);
+            _body.Place(_releases, 0, headerHeight, size.Width, middle);
+            _body.Place(_status, 0, size.Height - statusHeight, size.Width, statusHeight);
+        };
+        Content = _body;
 
-        _toolTips.SetToolTip(_search, "Search by title or folder name  (Ctrl+F)");
-                _toolTips.SetToolTip(_tagsButton, "Filter games by a store tag");
-        _toolTips.SetToolTip(_favoritesButton, "Show only your favorite games");
-        _toolTips.SetToolTip(_rescanButton, "Rescan this folder for games  (F5)");
-        _toolTips.SetToolTip(_moreButton, "More options");
-        _toolTips.SetToolTip(_viewToggle, "Switch between your library and new game releases on DLsite");
+        Ui.Tip(_search, "Search by title or folder name  (Ctrl+F)");
+        Ui.Tip(_tagsButton, "Filter games by a store tag");
+        Ui.Tip(_favoritesButton, "Show only your favorite games");
+        Ui.Tip(_rescanButton, "Rescan this folder for games  (F5)");
+        Ui.Tip(_moreButton, "More options");
+        Ui.Tip(_viewToggle, "Switch between your library and new game releases on DLsite");
 
         _favoritesButton.Checked = _store.Data.FavoritesOnly;
         UpdateSortButton();
@@ -205,42 +217,14 @@ internal sealed class MainForm : Form
 
         if (proxyWarning is not null) _store.LoadWarning ??= proxyWarning;
 
-        _header.Resize += (_, _) => LayoutHeader();
-        Shown += (_, _) =>
-        {
-            try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
-            _ = LoadLibraryAsync();
-        };
-    }
+        // Shortcuts work wherever the focus is, as with the WinForms KeyPreview.
+        AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
+        PositionChanged += (_, _) => RememberNormalBounds();
+        SizeChanged += (_, _) => RememberNormalBounds();
 
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
-        try
-        {
-            using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("RpgLauncher.app.ico");
-            if (stream is not null) Icon = new Icon(stream);
-        }
-        catch
-        {
-            // icon is cosmetic
-        }
-    }
-
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        float scale = DeviceDpi / 96f;
-        MinimumSize = new Size((int)Math.Round(1140f * scale), (int)Math.Round(620f * scale));
-        _header.Height = (int)Math.Round(96f * scale);
-        _status.Height = (int)Math.Round(32f * scale);
-
-        ApplyInitialBounds(scale);
-        LayoutHeader();
+        ApplyInitialBounds();
         UpdateHeaderSubtitle();
         ResetStatus();
-
         if (_store.LoadWarning is not null)
         {
             SetStatus(_store.LoadWarning);
@@ -248,95 +232,136 @@ internal sealed class MainForm : Form
         }
     }
 
-    private static readonly Size LargeScreen = new(2560, 1440);
-    private static readonly Size LargeScreenWindow = new(1920, 1080);
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        NativeMethods.StyleTitleBar(this);
+        RememberNormalBounds();
+        Look.PixelScale = RenderScaling;
+        ScalingChanged += (_, _) => Look.PixelScale = RenderScaling;
+        _ = LoadLibraryAsync();
+        if (_screenshot is not null) _ = CaptureScreenshotAsync(_screenshot);
+    }
+
+    /// <summary>Development aid (--screenshot path): saves the window once the library has loaded, then closes.</summary>
+    private async Task CaptureScreenshotAsync(string path)
+    {
+        await Task.Delay(2600);
+        // Give metadata lookups a chance to finish so the capture shows them.
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (MetadataLookupsRunning && DateTime.UtcNow < deadline)
+            await Task.Delay(150);
+        await Task.Delay(700);
+        try
+        {
+            double scale = RenderScaling;
+            var size = new PixelSize((int)Math.Round(Bounds.Width * scale), (int)Math.Round(Bounds.Height * scale));
+            using var bitmap = new RenderTargetBitmap(size, new Vector(96 * scale, 96 * scale));
+            bitmap.Render(this);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            bitmap.Save(path);
+        }
+        catch
+        {
+            // screenshot mode is a development aid only
+        }
+        Close();
+    }
+
+    private static readonly PixelSize LargeScreen = new(2560, 1440);
+    private static readonly PixelSize LargeScreenWindow = new(1920, 1080);
+
+    /// <summary>The frame around the window's inside on Windows, to turn saved outer sizes into inner ones.</summary>
+    private static Size FrameAllowance => OperatingSystem.IsWindows() ? new Size(16, 39) : default;
 
     /// <summary>Centred LargeScreenWindow bounds when the screen is at least LargeScreen; otherwise null.</summary>
-    internal static Rectangle? LargeScreenBounds(Rectangle screen, Rectangle working)
+    internal static PixelRect? LargeScreenBounds(PixelRect screen, PixelRect working)
     {
         if (screen.Width < LargeScreen.Width || screen.Height < LargeScreen.Height) return null;
         int width = Math.Min(LargeScreenWindow.Width, working.Width);
         int height = Math.Min(LargeScreenWindow.Height, working.Height);
-        return new Rectangle(working.Left + (working.Width - width) / 2, working.Top + (working.Height - height) / 2,
+        return new PixelRect(working.X + (working.Width - width) / 2, working.Y + (working.Height - height) / 2,
             width, height);
     }
 
-    private void ApplyInitialBounds(float scale)
+    /// <summary>Restores the saved place and outer size (screen pixels, as earlier versions saved them), or a default.</summary>
+    private void ApplyInitialBounds()
     {
-        var working = Screen.FromPoint(Cursor.Position).WorkingArea;
-        int defaultWidth = Math.Min((int)Math.Round(1280f * scale), working.Width - 60);
-        int defaultHeight = Math.Min((int)Math.Round(820f * scale), working.Height - 60);
-
         var saved = _store.Data.Window;
 
         // Large screens ignore the saved size; the saved screen and maximized state still apply.
-        var savedRect = new Rectangle(saved.X, saved.Y, saved.Width, saved.Height);
-        bool savedOnScreen = saved.Valid && saved.Width > 500 && saved.Height > 400 &&
-                             Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(savedRect));
-        var screen = savedOnScreen ? Screen.FromRectangle(savedRect) : Screen.FromPoint(Cursor.Position);
-        if (LargeScreenBounds(screen.Bounds, screen.WorkingArea) is { } large)
+        var savedRect = new PixelRect(saved.X, saved.Y, saved.Width, saved.Height);
+        bool savedUsable = saved.Valid && saved.Width > 500 && saved.Height > 400;
+        var savedScreen = savedUsable ? Screens.All.FirstOrDefault(s => s.WorkingArea.Intersects(savedRect)) : null;
+        var screen = savedScreen ?? Screens.Primary ?? Screens.All.FirstOrDefault();
+        if (screen is null) return;
+        double scale = screen.Scaling;
+        var working = screen.WorkingArea;
+
+        void UseOuterBounds(PixelRect rect)
         {
-            StartPosition = FormStartPosition.Manual;
-            Bounds = large;
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Position = rect.Position;
+            Width = Math.Max(MinWidth, rect.Width / scale - FrameAllowance.Width);
+            Height = Math.Max(MinHeight, rect.Height / scale - FrameAllowance.Height);
         }
-        else if (saved.Valid && saved.Width > 500 && saved.Height > 400)
+
+        if (LargeScreenBounds(screen.Bounds, working) is { } large)
         {
-            var rect = new Rectangle(saved.X, saved.Y, saved.Width, saved.Height);
-            bool onScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(rect));
-            if (onScreen)
-            {
-                StartPosition = FormStartPosition.Manual;
-                Bounds = rect;
-            }
-            else
-            {
-                ClientSize = new Size(defaultWidth, defaultHeight);
-                StartPosition = FormStartPosition.CenterScreen;
-            }
+            UseOuterBounds(large);
+        }
+        else if (savedScreen is not null)
+        {
+            UseOuterBounds(savedRect);
         }
         else
         {
-            ClientSize = new Size(defaultWidth, defaultHeight);
-            StartPosition = FormStartPosition.CenterScreen;
+            Width = Math.Min(1280, working.Width / scale - 60);
+            Height = Math.Min(820, working.Height / scale - 60);
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
         }
 
-        if (saved.Maximized) WindowState = FormWindowState.Maximized;
+        if (saved.Maximized) WindowState = Avalonia.Controls.WindowState.Maximized;
     }
 
-    private void LayoutHeader()
+    private void RememberNormalBounds()
     {
-        if (_header.ClientSize.Width <= 0) return;
-        float scale = Theme.Scale(_header);
-        int R(float value) => (int)Math.Round(value * scale);
-        int height = R(38f);
-        int gap = R(10f);
-        int right = _header.ClientSize.Width - R(28f);
-        int y = (int)Math.Round((_header.Height - height) / 2f) + R(3f);
+        if (WindowState != Avalonia.Controls.WindowState.Normal || !IsVisible) return;
+        var outer = FrameSize ?? Bounds.Size + FrameAllowance;
+        _normalPosition = Position;
+        _normalSize = new PixelSize((int)Math.Round(outer.Width * RenderScaling), (int)Math.Round(outer.Height * RenderScaling));
+    }
+
+    private void LayoutHeader(Size size)
+    {
+        if (size.Width <= 0) return;
+        const double height = 38, gap = 10;
+        double right = size.Width - 28;
+        double y = Math.Round((size.Height - height) / 2) + 3;
 
         var logo = _header.LogoBounds();
-        int toggleHeight = R(30f);
-        _viewToggle.Bounds = new Rectangle(logo.Right + R(18f), logo.Top + (logo.Height - toggleHeight) / 2,
-            _viewToggle.PreferredWidth(scale), toggleHeight);
-        int leftLimit = _viewToggle.Right + R(20f);
+        const double toggleHeight = 30;
+        double toggleWidth = _viewToggle.PreferredWidth();
+        _header.Place(_viewToggle, logo.Right + 18, logo.Top + (logo.Height - toggleHeight) / 2, toggleWidth, toggleHeight);
+        double leftLimit = logo.Right + 18 + toggleWidth + 20;
 
-        void PlaceRight(Control control, int width)
+        void PlaceRight(Control control, double width)
         {
-            control.Bounds = new Rectangle(right - width, y, width, height);
-            right = control.Left - gap;
+            _header.Place(control, right - width, y, width, height);
+            right -= width + gap;
         }
 
-        PlaceRight(_moreButton, R(38f));
-        PlaceRight(_rescanButton, R(38f));
-        if (!_showingReleases) PlaceRight(_favoritesButton, R(126f));
-        PlaceRight(_tagsButton, R(112f));
-        if (!_showingReleases) PlaceRight(_sortButton, R(176f));
+        PlaceRight(_moreButton, 38);
+        PlaceRight(_rescanButton, 38);
+        if (!_showingReleases) PlaceRight(_favoritesButton, 126);
+        PlaceRight(_tagsButton, 112);
+        if (!_showingReleases) PlaceRight(_sortButton, 176);
 
-        int searchWidth = R(230f);
-        if (_header.ClientSize.Width > 1320 * scale)
-            searchWidth += (int)Math.Min(110f * scale, (_header.ClientSize.Width - 1320f * scale) * 0.22f);
+        double searchWidth = 230;
+        if (size.Width > 1320) searchWidth += Math.Min(110, (size.Width - 1320) * 0.22);
         // Give way to the view switch on narrow windows.
-        searchWidth = Math.Max(R(140f), Math.Min(searchWidth, right - leftLimit));
-        _search.Bounds = new Rectangle(right - searchWidth, y, searchWidth, height);
+        searchWidth = Math.Max(140, Math.Min(searchWidth, right - leftLimit));
+        _header.Place(_search, right - searchWidth, y, searchWidth, height);
     }
 
     private void RefreshCurrentView()
@@ -351,20 +376,20 @@ internal sealed class MainForm : Form
         if (releases == _showingReleases) return;
         _showingReleases = releases;
 
-        _sortButton.Visible = !releases;
-        _favoritesButton.Visible = !releases;
+        _sortButton.IsVisible = !releases;
+        _favoritesButton.IsVisible = !releases;
         // Each view keeps its own tag filter.
         UpdateTagsButton();
-        _toolTips.SetToolTip(_tagsButton, releases ? "Filter new releases by a store tag" : "Filter games by a store tag");
-        _grid.Visible = !releases;
-        _releases.Visible = releases;
-        _toolTips.SetToolTip(_rescanButton, releases
+        Ui.Tip(_tagsButton, releases ? "Filter new releases by a store tag" : "Filter games by a store tag");
+        _grid.IsVisible = !releases;
+        _releases.IsVisible = releases;
+        Ui.Tip(_rescanButton, releases
             ? "Check DLsite for new releases  (F5)"
             : "Rescan this folder for games  (F5)");
-        _toolTips.SetToolTip(_search, releases
+        Ui.Tip(_search, releases
             ? "Search new releases by title, circle or tag  (Ctrl+F)"
             : "Search by title or folder name  (Ctrl+F)");
-        LayoutHeader();
+        _header.InvalidateMeasure();
 
         if (releases)
         {
@@ -386,7 +411,7 @@ internal sealed class MainForm : Form
         }
 
         UpdateHeaderSubtitle();
-        if (!_statusTimer.Enabled) ResetStatus();
+        if (!_statusTimer.IsEnabled) ResetStatus();
     }
 
     private void ShowReleaseDays()
@@ -440,7 +465,7 @@ internal sealed class MainForm : Form
         {
             foreach (var (date, englishOnly) in dates)
             {
-                if (!_statusTimer.Enabled) ResetStatus();
+                if (!_statusTimer.IsEnabled) ResetStatus();
                 try
                 {
                     ReleaseDay day;
@@ -448,7 +473,7 @@ internal sealed class MainForm : Form
                         day = await ReleaseStore.FetchEnglishAsync(cached, token);
                     else
                         day = await ReleaseStore.FetchDayAsync(date, english, token);
-                    if (IsDisposed) return;
+                    if (_closed) return;
                     // A cancelled run (e.g. the connection changed) must not write into the new cache.
                     token.ThrowIfCancellationRequested();
                     _releaseStore.Put(day);
@@ -480,18 +505,18 @@ internal sealed class MainForm : Form
 
         if (_releaseCts != cts) return;
         _releasesFetching = false;
-        if (IsDisposed) return;
+        if (_closed) return;
         await Task.Run(() =>
         {
             _releaseStore.Prune();
             _releaseStore.Save();
         });
-        if (IsDisposed) return;
+        if (_closed) return;
 
         ShowReleaseDays();
         if (_releaseError is not null && _releases.TotalCount > 0)
             SetStatus("Couldn't load every day from DLsite \u00b7 showing what is cached \u00b7 F5 to try again");
-        else if (!_statusTimer.Enabled)
+        else if (!_statusTimer.IsEnabled)
             ResetStatus();
     }
 
@@ -537,7 +562,7 @@ internal sealed class MainForm : Form
         }
 
         _loading = false;
-        if (IsDisposed) return;
+        if (_closed) return;
 
         if (cached is null || cached.Count == 0)
         {
@@ -571,7 +596,7 @@ internal sealed class MainForm : Form
         var progress = new Progress<int>(found =>
         {
             _scanFound = found;
-            if (_scanning && !_statusTimer.Enabled) ResetStatus();
+            if (_scanning && !_statusTimer.IsEnabled) ResetStatus();
         });
 
         // Last scan's games by folder, so the scanner can reuse unchanged ones.
@@ -603,7 +628,7 @@ internal sealed class MainForm : Form
         }
 
         _scanning = false;
-        if (cts.IsCancellationRequested || IsDisposed)
+        if (cts.IsCancellationRequested || _closed)
         {
             _loading = false;
             return;
@@ -858,7 +883,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (token.IsCancellationRequested || IsDisposed)
+        if (token.IsCancellationRequested || _closed)
         {
             bitmap?.Dispose();
             return;
@@ -1023,7 +1048,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (IsDisposed) return;
+        if (_closed) return;
 
         bool changed = added > 0 || translated > 0 || englishTitled > 0;
         bool tagCleared = changed && ValidateTagFilter();
@@ -1230,18 +1255,16 @@ internal sealed class MainForm : Form
     /// <summary>Points a game at a pasted DLsite page, for games the search can't find.</summary>
     private async Task SetStorePageAsync(GameEntry game)
     {
-        using (var dialog = new TextPromptDialog("Set DLsite page",
-                   "Paste the game's DLsite page link or its RJ code:", game.Metadata?.ProductId ?? "", "Use this"))
+        var dialog = new TextPromptDialog("Set DLsite page",
+            "Paste the game's DLsite page link or its RJ code:", game.Metadata?.ProductId ?? "", "Use this");
+        if (!await dialog.ShowAsync(this)) return;
+        string? id = MetadataService.ProductIdFrom(dialog.Value);
+        if (id is null)
         {
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            string? id = MetadataService.ProductIdFrom(dialog.Value);
-            if (id is null)
-            {
-                SetStatus("That isn't a DLsite page or RJ code");
-                return;
-            }
-            await LookupMetadataManuallyAsync(game, id);
+            SetStatus("That isn't a DLsite page or RJ code");
+            return;
         }
+        await LookupMetadataManuallyAsync(game, id);
     }
 
     private async Task LookupMetadataManuallyAsync(GameEntry game, string? productId = null)
@@ -1252,7 +1275,7 @@ internal sealed class MainForm : Form
         var result = string.IsNullOrWhiteSpace(productId)
             ? await LookupMetadataAsync(game, CancellationToken.None)
             : await LookupProductAsync(productId, CancellationToken.None);
-        if (IsDisposed || result is null) return;
+        if (_closed || result is null) return;
 
         if (result.Metadata is { } metadata)
         {
@@ -1310,7 +1333,7 @@ internal sealed class MainForm : Form
                                            !string.IsNullOrWhiteSpace(g.Metadata?.ImageUrl)).ToList();
             foreach (var game in wanted)
             {
-                if (token.IsCancellationRequested || IsDisposed) return;
+                if (token.IsCancellationRequested || _closed) return;
                 string path = StoreImageFile(game)!;
                 if (!File.Exists(path))
                 {
@@ -1320,8 +1343,10 @@ internal sealed class MainForm : Form
                         if (url.StartsWith("//", StringComparison.Ordinal)) url = "https:" + url;
                         if (!WebLinks.IsTrusted(url)) continue;
                         var bytes = await MetadataService.Client.GetByteArrayAsync(url, token);
-                        using (var check = new MemoryStream(bytes, writable: false))
-                        using (Image.FromStream(check, useEmbeddedColorManagement: false, validateImageData: false)) { }
+                        using (var check = ImageKit.Decode(bytes))
+                        {
+                            if (check is null) throw new InvalidDataException("not a picture");
+                        }
 
                         Directory.CreateDirectory(StoreImagesDirectory);
                         string temp = path + ".tmp";
@@ -1341,13 +1366,13 @@ internal sealed class MainForm : Form
                     }
                 }
 
-                if (IsDisposed || !_games.Contains(game) || !game.WantsStoreImage) continue;
+                if (_closed || !_games.Contains(game) || !game.WantsStoreImage) continue;
                 string? oldCache = GameImageLoader.CachePathFor(game);
                 game.StoreImagePath = path;
                 await ReloadThumbnailAsync(game, oldCache);
             }
         }
-        while (_storeImagesAgain && !token.IsCancellationRequested && !IsDisposed);
+        while (_storeImagesAgain && !token.IsCancellationRequested && !_closed);
     }
 
     private void SetStoreImagePreference(GameEntry game, bool prefer)
@@ -1411,28 +1436,29 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void ChangeImage(GameEntry game)
+    private async void ChangeImage(GameEntry game)
     {
-        using var picker = new OpenFileDialog
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Choose a card image for " + game.CardTitle,
-            Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff|All files|*.*",
-            CheckFileExists = true
-        };
-        if (picker.ShowDialog(this) != DialogResult.OK) return;
+            AllowMultiple = false,
+            FileTypeFilter = new[] { FilePickerFileTypes.ImageAll, FilePickerFileTypes.All }
+        });
+        string? picked = files.Count > 0 ? files[0].TryGetLocalPath() : null;
+        if (picked is null) return;
 
-        using var image = GameImageLoader.LoadImage(picker.FileName, null);
+        var image = GameImageLoader.LoadPicture(picked);
         if (image is null)
         {
             SetStatus("That file could not be opened as an image");
             return;
         }
 
-        using var framingDialog = new ImageFramingDialog(image, null, game.CardTitle);
-        if (framingDialog.ShowDialog(this) != DialogResult.OK) return;
+        var framingDialog = new ImageFramingDialog(image, null, game.CardTitle);
+        if (!await framingDialog.ShowAsync(this)) return;
 
         // Keep a private copy so the card survives the original being moved or deleted.
-        string extension = Path.GetExtension(picker.FileName).ToLowerInvariant();
+        string extension = Path.GetExtension(picked).ToLowerInvariant();
         if (string.IsNullOrEmpty(extension)) extension = ".png";
         string hash = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(
             System.Text.Encoding.UTF8.GetBytes(game.Key.ToLowerInvariant())))[..12];
@@ -1440,7 +1466,7 @@ internal sealed class MainForm : Form
         try
         {
             Directory.CreateDirectory(ImagesDirectory);
-            File.Copy(picker.FileName, Path.Combine(ImagesDirectory, fileName), overwrite: true);
+            File.Copy(picked, Path.Combine(ImagesDirectory, fileName), overwrite: true);
         }
         catch (Exception ex)
         {
@@ -1458,17 +1484,17 @@ internal sealed class MainForm : Form
         SetStatus($"New image set for {game.CardTitle}");
     }
 
-    private void AdjustFraming(GameEntry game)
+    private async void AdjustFraming(GameEntry game)
     {
-        using var source = GameImageLoader.LoadSourceImage(game);
+        var source = GameImageLoader.LoadSourcePicture(game);
         if (source is null)
         {
             SetStatus("This game has no picture to frame \u00b7 use Change image\u2026 to pick one");
             return;
         }
 
-        using var dialog = new ImageFramingDialog(source, game.Framing ?? GameImageLoader.DefaultFraming(game), game.CardTitle);
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var dialog = new ImageFramingDialog(source, game.Framing ?? GameImageLoader.DefaultFraming(game), game.CardTitle);
+        if (!await dialog.ShowAsync(this)) return;
 
         var framing = dialog.Framing;
         UpdateCardImage(game, record => record.Framing = framing.IsDefault ? null : framing);
@@ -1520,7 +1546,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        if (IsDisposed || token.IsCancellationRequested || !_games.Contains(game))
+        if (_closed || token.IsCancellationRequested || !_games.Contains(game))
         {
             bitmap?.Dispose();
             return;
@@ -1548,11 +1574,10 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void ShowGameInfo(GameEntry game)
+    private async void ShowGameInfo(GameEntry game)
     {
         if (game.Metadata is null) return;
-        using var dialog = new GameInfoDialog(game);
-        dialog.ShowDialog(this);
+        await new GameInfoDialog(game).ShowAsync(this);
     }
 
     /// <summary>Rebuilds the visible list; a reset returns to page 1 unless <paramref name="keepPage"/>.</summary>
@@ -1574,7 +1599,7 @@ internal sealed class MainForm : Form
         _status.SetPages(_page, _showingReleases ? 1 : _pageCount);
         _grid.SetVisibleGames(view, resetScroll);
         UpdateHeaderSubtitle();
-        if (!_statusTimer.Enabled) ResetStatus();
+        if (!_statusTimer.IsEnabled) ResetStatus();
     }
 
     private void GoToPage(int page)
@@ -1609,12 +1634,12 @@ internal sealed class MainForm : Form
             item.Checked = i == _page;
             menu.Items.Add(item);
         }
-        Menus.Show(menu, _status, location, ToolStripDropDownDirection.AboveRight);
+        Menus.Show(menu, _status, location, MenuDirection.AboveRight);
     }
 
     private static readonly int[] PageSizePresets = { 24, 48, 96, 120 };
 
-    private ToolStripMenuItem BuildPageSizeMenu(ContextMenuStrip owner)
+    private DarkMenuItem BuildPageSizeMenu(DarkMenu owner)
     {
         int current = _store.Data.PageSize;
         var root = Menus.Item(current > 0 ? $"Games per page: {current}" : "Games per page: all");
@@ -1647,10 +1672,10 @@ internal sealed class MainForm : Form
         return "The saved DLsite proxy can't be used (" + error + ") \u00b7 connecting directly";
     }
 
-    private void ShowProxyDialog()
+    private async void ShowProxyDialog()
     {
-        using var dialog = new ProxyDialog(_store.Data.DlsiteProxy);
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var dialog = new ProxyDialog(_store.Data.DlsiteProxy);
+        if (!await dialog.ShowAsync(this)) return;
 
         var settings = dialog.Settings;
         _store.Data.DlsiteProxy = settings.IsSet ? settings : null;
@@ -1683,20 +1708,20 @@ internal sealed class MainForm : Form
         SetStatus(message);
     }
 
-    private ToolStripMenuItem BuildStyleMenu(ContextMenuStrip owner)
+    private DarkMenuItem BuildStyleMenu(DarkMenu owner)
     {
-        var root = Menus.Item($"Style: {UiStyleLabels.Label(Theme.Style)}");
+        var root = Menus.Item($"Style: {UiStyleLabels.Label(Look.Style)}");
         foreach (var style in Enum.GetValues<UiStyle>())
         {
             var item = Menus.Item(UiStyleLabels.Label(style), (_, _) => ApplyStyle(style));
-            item.Checked = style == Theme.Style;
+            item.Checked = style == Look.Style;
             root.DropDownItems.Add(item);
         }
         Menus.StyleSubmenu(root, owner, checks: true);
         return root;
     }
 
-    private ToolStripMenuItem BuildCardShapeMenu(ContextMenuStrip owner)
+    private DarkMenuItem BuildCardShapeMenu(DarkMenu owner)
     {
         var current = _store.Data.CardShape;
         var root = Menus.Item($"Card shape: {(current == CardShape.Square ? "Square" : "Rectangular")}");
@@ -1722,7 +1747,7 @@ internal sealed class MainForm : Form
         SetStatus(shape == CardShape.Square ? "Square cards" : "Rectangular cards");
     }
 
-    private ToolStripMenuItem BuildCardPictureMenu(ContextMenuStrip owner)
+    private DarkMenuItem BuildCardPictureMenu(DarkMenu owner)
     {
         var current = _store.Data.CardPicture;
         var root = Menus.Item($"Card pictures: {(current == CardPicture.StoreImage ? "DLsite image" : "Title screen")}");
@@ -1778,7 +1803,7 @@ internal sealed class MainForm : Form
         {
             return;
         }
-        if (token.IsCancellationRequested || IsDisposed || !_games.Contains(game))
+        if (token.IsCancellationRequested || _closed || !_games.Contains(game))
         {
             bitmap?.Dispose();
             return;
@@ -1792,46 +1817,26 @@ internal sealed class MainForm : Form
     /// <summary>Switches the whole window to another style without restarting.</summary>
     private void ApplyStyle(UiStyle style)
     {
-        if (style == Theme.Style) return;
-        var previous = Theme.Current;
-        Theme.Apply(style);
+        if (style == Look.Style) return;
+        Look.Apply(style);
         _store.Data.Style = style;
         SaveData();
 
-        // Controls copied theme colors at creation; remap them to the new palette.
-        RemapColors(this, ColorMap(previous, Theme.Current));
+        Background = Look.Brush(Look.Bg);
+        Foreground = Look.Brush(Look.Text);
         _header.Mascot = style == UiStyle.Blob ? Mascots.Header : null;
-        try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
-        LayoutHeader();
+        NativeMethods.StyleTitleBar(this);
+        _header.InvalidateMeasure();
         _grid.ResetArtwork();
-        Invalidate(invalidateChildren: true);
+        // Drawn controls pick up the new colors when they draw again.
+        foreach (var visual in this.GetVisualDescendants()) visual.InvalidateVisual();
         SetStatus("Style: " + UiStyleLabels.Label(style));
     }
 
-    private static Dictionary<int, Color> ColorMap(Palette from, Palette to)
+    private async void ChoosePageSize()
     {
-        var map = new Dictionary<int, Color>();
-        foreach (var property in typeof(Palette).GetProperties().Where(p => p.PropertyType == typeof(Color)))
-        {
-            var old = (Color)property.GetValue(from)!;
-            map.TryAdd(old.ToArgb(), (Color)property.GetValue(to)!);
-        }
-        return map;
-    }
-
-    private static void RemapColors(Control control, Dictionary<int, Color> map)
-    {
-        if (control.BackColor != Color.Transparent && map.TryGetValue(control.BackColor.ToArgb(), out var back))
-            control.BackColor = back;
-        if (map.TryGetValue(control.ForeColor.ToArgb(), out var fore))
-            control.ForeColor = fore;
-        foreach (Control child in control.Controls) RemapColors(child, map);
-    }
-
-    private void ChoosePageSize()
-    {
-        using var dialog = new PageSizeDialog(_store.Data.PageSize);
-        if (dialog.ShowDialog(this) == DialogResult.OK) SetPageSize(dialog.PageSize);
+        var dialog = new PageSizeDialog(_store.Data.PageSize);
+        if (await dialog.ShowAsync(this)) SetPageSize(dialog.PageSize);
     }
 
     private void SetPageSize(int size)
@@ -1993,21 +1998,21 @@ internal sealed class MainForm : Form
         {
             _sortButton.Text = group.Length > 16 ? group[..15].TrimEnd() + "\u2026" : group;
             _sortButton.Checked = true;
-            _toolTips.SetToolTip(_sortButton, $"Showing the group \u201c{group}\u201d \u00b7 sorted by {sort}");
+            Ui.Tip(_sortButton, $"Showing the group \u201c{group}\u201d \u00b7 sorted by {sort}");
         }
         else if (_store.Data.NoStorePageOnly)
         {
             _sortButton.Text = "No DLsite Page";
             _sortButton.Checked = true;
-            _toolTips.SetToolTip(_sortButton, $"Showing games without a DLsite page \u00b7 sorted by {sort}");
+            Ui.Tip(_sortButton, $"Showing games without a DLsite page \u00b7 sorted by {sort}");
         }
         else
         {
             _sortButton.Text = SortLabels.Label(_store.Data.Sort);
             _sortButton.Checked = false;
-            _toolTips.SetToolTip(_sortButton, "Change the sort order or pick a group");
+            Ui.Tip(_sortButton, "Change the sort order or pick a group");
         }
-        _sortButton.Invalidate();
+        _sortButton.InvalidateVisual();
     }
 
     private void UpdateHeaderSubtitle()
@@ -2107,23 +2112,20 @@ internal sealed class MainForm : Form
 
         // Groups narrow the library; the sort order above still applies inside a group.
         menu.Items.Add(Menus.Separator());
-        // Groups can be dragged up or down to reorder them.
-        MenuReorder? reorder = null;
-        bool Dragged() => reorder?.Moved == true;
-        AddGroupItem(menu, null, "All Games", Dragged);
+        AddGroupItem(menu, null, "All Games");
         // Games without a store page, to fix with Set DLsite page… or a rename.
         var noStore = Menus.Item($"No DLsite Page  ({_games.Count(g => g.Metadata is null)})", (_, _) => SelectNoStorePage());
         noStore.Checked = _store.Data.NoStorePageOnly;
         menu.Items.Add(noStore);
-        var groupItems = new List<ToolStripMenuItem>();
+        var groupItems = new List<DarkMenuItem>();
         foreach (var name in _store.Data.Groups)
         {
             int count = _games.Count(g => g.Groups.Contains(name, StringComparer.CurrentCultureIgnoreCase));
-            groupItems.Add(AddGroupItem(menu, name, $"{GameCard.MenuText(name)}  ({count})", Dragged));
+            groupItems.Add(AddGroupItem(menu, name, $"{GameCard.MenuText(name)}  ({count})"));
         }
 
         var manage = Menus.Item("Manage Groups");
-        manage.DropDownItems.Add(Menus.Item("New Group\u2026", (_, _) => CreateGroup()));
+        manage.DropDownItems.Add(Menus.Item("New Group\u2026", (_, _) => _ = CreateGroupAsync()));
         if (_store.Data.Groups.Count > 0)
         {
             var rename = Menus.Item("Rename");
@@ -2141,19 +2143,17 @@ internal sealed class MainForm : Form
         }
         Menus.StyleSubmenu(manage, menu, checks: true);
         menu.Items.Add(manage);
-        reorder = new MenuReorder(menu, groupItems, () => SaveGroupOrder(groupItems));
+        // Groups can be dragged up or down to reorder them.
+        menu.EnableReorder(groupItems, () => SaveGroupOrder(groupItems));
 
-        Menus.Show(menu, _sortButton, new Point(0, _sortButton.Height + 4));
+        Menus.Show(menu, _sortButton, new Point(0, _sortButton.Bounds.Height + 4));
     }
 
-    private ToolStripMenuItem AddGroupItem(ContextMenuStrip menu, string? group, string text, Func<bool> dragged)
+    private DarkMenuItem AddGroupItem(DarkMenu menu, string? group, string text)
     {
         // The group is read from Tag when clicked, because reordering swaps the items' contents.
-        var item = Menus.Item(text, (sender, _) =>
-        {
-            // releasing the mouse after a drag isn't a click
-            if (!dragged()) SelectGroup((sender as ToolStripItem)?.Tag as string);
-        });
+        // (Releasing the mouse after a drag isn't a click; the menu sees to that.)
+        var item = Menus.Item(text, (sender, _) => SelectGroup((sender as DarkMenuItem)?.Tag as string));
         item.Tag = group;
         item.Checked = !_store.Data.NoStorePageOnly &&
                        string.Equals(_store.Data.ActiveGroup, group, StringComparison.CurrentCultureIgnoreCase);
@@ -2161,7 +2161,7 @@ internal sealed class MainForm : Form
         return item;
     }
 
-    private void SaveGroupOrder(List<ToolStripMenuItem> items)
+    private void SaveGroupOrder(List<DarkMenuItem> items)
     {
         var order = items.Select(item => item.Tag).OfType<string>().ToList();
         _store.Data.Groups.Clear();
@@ -2170,7 +2170,7 @@ internal sealed class MainForm : Form
         SetStatus("Group order saved");
     }
 
-    private void AddEngineItem(ContextMenuStrip menu, EngineFamily? family, string text)
+    private void AddEngineItem(DarkMenu menu, EngineFamily? family, string text)
     {
         var item = Menus.Item(text, (_, _) => SelectEngine(family));
         item.Checked = _store.Data.EngineFilter == family;
@@ -2207,10 +2207,10 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>Asks for a group name; null when cancelled or left empty.</summary>
-    private string? AskGroupName(string title, string caption, string current, string okText)
+    private async Task<string?> AskGroupNameAsync(string title, string caption, string current, string okText)
     {
-        using var dialog = new TextPromptDialog(title, caption, current, okText);
-        if (dialog.ShowDialog(this) != DialogResult.OK) return null;
+        var dialog = new TextPromptDialog(title, caption, current, okText);
+        if (!await dialog.ShowAsync(this)) return null;
         string name = dialog.Value;
         return name.Length == 0 ? null : name;
     }
@@ -2219,9 +2219,9 @@ internal sealed class MainForm : Form
     private string? FindGroup(string name) =>
         _store.Data.Groups.FirstOrDefault(g => string.Equals(g, name, StringComparison.CurrentCultureIgnoreCase));
 
-    private string? CreateGroup()
+    private async Task<string?> CreateGroupAsync()
     {
-        string? name = AskGroupName("New group", "Name the new group:", "", "Create");
+        string? name = await AskGroupNameAsync("New group", "Name the new group:", "", "Create");
         if (name is null) return null;
         if (FindGroup(name) is { } existing) return existing;
         _store.Data.Groups.Add(name);
@@ -2230,11 +2230,11 @@ internal sealed class MainForm : Form
         return name;
     }
 
-    private void RenameGame(GameEntry game)
+    private async void RenameGame(GameEntry game)
     {
-        using var dialog = new TextPromptDialog("Rename game",
-            "Name to show for this game (empty for the automatic name):", game.CardTitle, "Rename");
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var dialog = new TextPromptDialog("Rename game",
+            "Name to show (empty for the automatic name):", game.CardTitle, "Rename");
+        if (!await dialog.ShowAsync(this)) return;
 
         // An empty name, or the automatic one typed back in, restores the automatic name.
         string? previous = game.CustomTitle;
@@ -2252,12 +2252,12 @@ internal sealed class MainForm : Form
             : $"Renamed to {game.CardTitle}");
     }
 
-    private void ToggleGroup(GameEntry game, string? group)
+    private async void ToggleGroup(GameEntry game, string? group)
     {
         bool add;
         if (group is null)
         {
-            group = CreateGroup();
+            group = await CreateGroupAsync();
             if (group is null) return;
             add = true;
         }
@@ -2307,32 +2307,31 @@ internal sealed class MainForm : Form
         RefreshView(keepPage: true);
     }
 
-    private void RenameGroup(string group)
+    private async void RenameGroup(string group)
     {
-        string? name = AskGroupName("Rename group", $"New name for \u201c{group}\u201d:", group, "Rename");
+        string? name = await AskGroupNameAsync("Rename group", $"New name for \u201c{group}\u201d:", group, "Rename");
         if (name is null || name == group) return;
         if (FindGroup(name) is { } existing && !string.Equals(existing, group, StringComparison.CurrentCultureIgnoreCase))
         {
-            MessageBox.Show(this, $"There is already a group called \u201c{existing}\u201d.", "Rename group",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            await MessageDialog.ShowAsync(this, $"There is already a group called \u201c{existing}\u201d.", "Rename group");
             return;
         }
         ReplaceGroup(group, name);
         SetStatus($"Renamed \u201c{group}\u201d to \u201c{name}\u201d");
     }
 
-    private void DeleteGroup(string group)
+    private async void DeleteGroup(string group)
     {
         int count = _games.Count(g => g.Groups.Contains(group, StringComparer.CurrentCultureIgnoreCase));
-        var answer = MessageBox.Show(this,
+        bool delete = await MessageDialog.ShowAsync(this,
             $"Delete the group \u201c{group}\u201d?\n\nIts {count} {(count == 1 ? "game stays" : "games stay")} in your library; only the group goes away.",
-            "Delete group", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
-        if (answer != DialogResult.OK) return;
+            "Delete group", MessageButtons.OkCancel);
+        if (!delete) return;
         ReplaceGroup(group, null);
         SetStatus($"Deleted the group \u201c{group}\u201d");
     }
 
-    private void AddSortItem(ContextMenuStrip menu, SortMode mode, string text)
+    private void AddSortItem(DarkMenu menu, SortMode mode, string text)
     {
         var item = Menus.Item(text, (_, _) =>
         {
@@ -2355,7 +2354,7 @@ internal sealed class MainForm : Form
         foreach (var tag in game.Tags) picked.Include.Add(tag);
 
         var popup = new TagFilterPopup(BuildTagGroups(), picked, _games.Count, _store.Data.MetadataLanguage,
-            Theme.Scale(this), new TagPicking(game.CardTitle, locked));
+            new TagPicking(game.CardTitle, locked));
         popup.FilterChanged += () =>
         {
             var added = picked.Include.Where(tag => !locked.Contains(tag)).ToList();
@@ -2371,14 +2370,13 @@ internal sealed class MainForm : Form
             ToggleFavoriteTag(tag);
             popup.UpdateGroups(BuildTagGroups());
         };
-        popup.FormClosed += (_, _) =>
+        popup.Closed += (_, _) =>
         {
             if (ReferenceEquals(_tagPicker, popup)) _tagPicker = null;
             int count = game.AddedTags.Count;
             SetStatus(count == 0
                 ? $"No tags added to {game.CardTitle}"
                 : $"{count} tag{(count == 1 ? "" : "s")} added to {game.CardTitle}");
-            popup.Dispose();
         };
         _tagPicker = popup;
         popup.ShowCentered(this);
@@ -2386,7 +2384,7 @@ internal sealed class MainForm : Form
 
     private void ShowTagFilter()
     {
-        if (_tagPopup is { IsDisposed: false })
+        if (_tagPopup is not null)
         {
             _tagPopup.Close();
             return;
@@ -2424,7 +2422,7 @@ internal sealed class MainForm : Form
         var popup = new TagFilterPopup(groups,
             _showingReleases ? _releaseTagFilter : _tagFilter,
             _showingReleases ? _releases.TotalCount : _games.Count,
-            _store.Data.MetadataLanguage, Theme.Scale(this));
+            _store.Data.MetadataLanguage);
         popup.FilterChanged += OnTagFilterChanged;
         popup.FavoriteToggled += tag =>
         {
@@ -2434,11 +2432,10 @@ internal sealed class MainForm : Form
                 ? BuildTagGroups(_releaseStore.Days().SelectMany(day => day.Items).Select(item => item.TagsFor(language)))
                 : BuildTagGroups());
         };
-        popup.FormClosed += (_, _) =>
+        popup.Closed += (_, _) =>
         {
             if (ReferenceEquals(_tagPopup, popup)) _tagPopup = null;
             _tagPopupClosedUtc = DateTime.UtcNow;
-            popup.Dispose();
         };
         _tagPopup = popup;
         popup.ShowBelow(_tagsButton);
@@ -2536,11 +2533,11 @@ internal sealed class MainForm : Form
         var filter = _showingReleases ? _releaseTagFilter : _tagFilter;
         _tagsButton.Checked = !filter.IsEmpty;
         _tagsButton.Text = filter.IsEmpty ? "Tags" : $"Tags \u00b7 {filter.Count}";
-        _tagsButton.Invalidate();
+        _tagsButton.InvalidateVisual();
     }
 
     /// <summary>Shows the same details panel as a library game, built from the cached listing.</summary>
-    private void ShowReleaseInfo(ReleaseItem item, DateTime released)
+    private async void ShowReleaseInfo(ReleaseItem item, DateTime released)
     {
         var language = _store.Data.MetadataLanguage;
         var metadata = new GameMetadata
@@ -2586,8 +2583,7 @@ internal sealed class MainForm : Form
         if (languages.Count > 0) rows.Add(("LANGUAGES", string.Join(", ", languages)));
         rows.Add(("PRODUCT", item.ProductId + (IsOwnedRelease(item) ? "  \u00b7  in your library" : "")));
 
-        using var dialog = new GameInfoDialog(entry, rows);
-        dialog.ShowDialog(this);
+        await new GameInfoDialog(entry, rows).ShowAsync(this);
     }
 
     private bool IsOwnedRelease(ReleaseItem item) => _ownedProductIds.Contains(item.ProductId);
@@ -2654,6 +2650,9 @@ internal sealed class MainForm : Form
             : connection.HasProxy ? ": proxy"
             : connection.Adapter == DlsiteConnection.AnyVpnAdapter ? ": VPN" : ": " + connection.Adapter;
         menu.Items.Add(Menus.Item($"DLsite connection{connectionLabel}\u2026", (_, _) => ShowProxyDialog()));
+        // The games are Windows programs; elsewhere they run through Wine or a Proton wrapper.
+        if (!OperatingSystem.IsWindows())
+            menu.Items.Add(Menus.Item($"Wine command: {Shell.WineCommand}\u2026", (_, _) => ChooseWineCommand()));
         menu.Items.Add(Menus.Item($"Language: {MetadataLanguageLabels.Label(_store.Data.MetadataLanguage)}",
             (_, _) => ToggleMetadataLanguage()));
         menu.Items.Add(BuildStyleMenu(menu));
@@ -2663,22 +2662,33 @@ internal sealed class MainForm : Form
         menu.Items.Add(Menus.Item("Clear all ratings", (_, _) => ClearAllRatings()));
         menu.Items.Add(Menus.Item("About RPG Launcher", (_, _) => ShowAbout()));
 
-        Menus.Show(menu, _moreButton, new Point(0, _moreButton.Height + 4));
+        Menus.Show(menu, _moreButton, new Point(0, _moreButton.Bounds.Height + 4));
+    }
+
+    private async void ChooseWineCommand()
+    {
+        var dialog = new TextPromptDialog("Wine command",
+            "Command that runs the games (for example wine, or flatpak run org.winehq.Wine):", Shell.WineCommand, "Save");
+        if (!await dialog.ShowAsync(this)) return;
+        string command = dialog.Value.Length == 0 ? "wine" : dialog.Value;
+        Shell.WineCommand = command;
+        _store.Data.WineCommand = command == "wine" ? null : command;
+        SaveData();
+        SetStatus($"Games now start with {command}");
     }
 
     private async Task AddDirectoryFromDialog()
     {
-        using var dialog = new FolderBrowserDialog
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Description = "Choose a folder containing RPG Maker games. Games in the folder and its subfolders will be added.",
-            UseDescriptionForTitle = true,
-            ShowNewFolderButton = false,
-            SelectedPath = _root
-        };
+            Title = "Choose a folder containing RPG Maker games. Games in the folder and its subfolders will be added.",
+            AllowMultiple = false,
+            SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(_root)
+        });
+        string? picked = folders.Count > 0 ? folders[0].TryGetLocalPath() : null;
+        if (picked is null) return;
 
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-
-        string? directory = NormalizeDirectory(dialog.SelectedPath);
+        string? directory = NormalizeDirectory(picked);
         if (directory is null)
         {
             SetStatus("That folder path is not valid");
@@ -2696,13 +2706,13 @@ internal sealed class MainForm : Form
         if (_loading)
         {
             SetStatus("Folder added \u00b7 waiting for the current scan\u2026", transient: false);
-            while (_loading && !IsDisposed) await Task.Delay(120);
-            if (IsDisposed) return;
+            while (_loading && !_closed) await Task.Delay(120);
+            if (_closed) return;
         }
 
         int before = _games.Count;
         await RefreshGamesAsync();
-        if (IsDisposed) return;
+        if (_closed) return;
 
         int added = Math.Max(0, _games.Count - before);
         string name = Path.GetFileName(directory);
@@ -2716,12 +2726,12 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void ClearAllRatings()
+    private async void ClearAllRatings()
     {
         if (_games.Count == 0) return;
-        var result = MessageBox.Show(this, "Clear every rating in this collection?", "RPG Launcher",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
-        if (result != DialogResult.Yes) return;
+        bool clear = await MessageDialog.ShowAsync(this, "Clear every rating in this collection?", "RPG Launcher",
+            MessageButtons.YesNo, defaultNo: true);
+        if (!clear) return;
 
         foreach (var game in _games)
         {
@@ -2734,7 +2744,7 @@ internal sealed class MainForm : Form
         SetStatus("All ratings cleared");
     }
 
-    private void ShowAbout()
+    private async void ShowAbout()
     {
         string locations = string.Join("\n  ", new[] { _root }.Concat(ExtraGameDirectories()));
         string message =
@@ -2747,10 +2757,14 @@ internal sealed class MainForm : Form
             "\u2022 Right-click a card for more options\n" +
             "\u2022 Press F5 to rescan\n" +
             "\u2022 Use \u22ef \u2192 Add directory\u2026 for games in another folder\n\n" +
-            $"Ratings are stored in launcher-data.json\nVersion {Application.ProductVersion}";
+            $"Ratings are stored in launcher-data.json\nVersion {Version}";
 
-        MessageBox.Show(this, message, "About RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        await MessageDialog.ShowAsync(this, message, "About RPG Launcher");
     }
+
+    private static string Version =>
+        (typeof(MainWindow).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "")
+        .Split('+')[0];
 
     private void ToggleFavorite(GameEntry game)
     {
@@ -2817,17 +2831,17 @@ internal sealed class MainForm : Form
         }
         if (game.IsRunning)
         {
-            MessageBox.Show(this,
+            _ = MessageDialog.ShowAsync(this,
                 $"{game.CardTitle} is already running.\n\nClose it first: cheats are added when the launcher starts the game.",
-                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "RPG Launcher");
             return;
         }
 
         string? plugins = game.DataRoot is { } root ? CheatBridge.PluginsFile(root) : null;
         if (plugins is null || !File.Exists(plugins))
         {
-            MessageBox.Show(this, $"Cheats need the game's js\\plugins.js, which {game.CardTitle} doesn't have.",
-                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            _ = MessageDialog.ShowAsync(this, $"Cheats need the game's js/plugins.js, which {game.CardTitle} doesn't have.",
+                "RPG Launcher");
             return;
         }
 
@@ -2838,8 +2852,8 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            MessageBox.Show(this, $"Couldn't add cheats to {game.CardTitle}: its js\\plugins.js can't be changed.\n\n{ex.Message}",
-                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _ = MessageDialog.ShowAsync(this, $"Couldn't add cheats to {game.CardTitle}: its js/plugins.js can't be changed.\n\n{ex.Message}",
+                "RPG Launcher");
             return;
         }
 
@@ -2857,14 +2871,14 @@ internal sealed class MainForm : Form
 
     private void ShowCheatWindow(GameEntry game, CheatLaunch launch)
     {
-        if (launch.Window is { IsDisposed: false } open)
+        if (launch.Window is { } open)
         {
-            if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
+            if (open.WindowState == Avalonia.Controls.WindowState.Minimized) open.WindowState = Avalonia.Controls.WindowState.Normal;
             open.Activate();
             return;
         }
         var window = new CheatWindow(game.CardTitle, launch.Port, launch.Secret, Icon, () => RemoveCheatScript(launch));
-        window.FormClosed += (_, _) => { if (launch.Window == window) launch.Window = null; };
+        window.Closed += (_, _) => { if (launch.Window == window) launch.Window = null; };
         launch.Window = window;
         window.Show();
     }
@@ -2889,22 +2903,15 @@ internal sealed class MainForm : Form
         started = null;
         if (string.IsNullOrWhiteSpace(game.ExecutablePath) || !File.Exists(game.ExecutablePath))
         {
-            MessageBox.Show(this,
+            _ = MessageDialog.ShowAsync(this,
                 $"No game executable was found for:\n{game.CardTitle}\n\nExpected Game.exe, nw.exe or RPG_RT.exe in:\n{game.RootPath}",
-                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "RPG Launcher");
             return false;
         }
 
         try
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = game.ExecutablePath,
-                Arguments = arguments ?? "",
-                WorkingDirectory = game.RootPath,
-                UseShellExecute = true
-            };
-            var process = Process.Start(startInfo);
+            var process = Process.Start(Shell.GameStartInfo(game.ExecutablePath, game.RootPath, arguments));
             started = process;
 
             game.PlayCount++;
@@ -2932,7 +2939,7 @@ internal sealed class MainForm : Form
                     long seconds = (long)stopwatch.Elapsed.TotalSeconds;
                     try
                     {
-                        BeginInvoke(new Action(() => OnGameExited(game.Key, process, seconds)));
+                        Dispatcher.UIThread.Post(() => OnGameExited(game.Key, process, seconds));
                     }
                     catch
                     {
@@ -2947,9 +2954,9 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this,
+            _ = MessageDialog.ShowAsync(this,
                 $"Could not start the game:\n{ex.Message}\n\n{game.ExecutablePath}",
-                "RPG Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "RPG Launcher");
             return false;
         }
     }
@@ -2975,7 +2982,7 @@ internal sealed class MainForm : Form
             _running[key] = game.RunningCount;
             game.CheatsOn = _cheatLaunches.ContainsKey(key);
             _grid.RefreshCard(game);
-            SetStatus($"{game.CardTitle} closed \u00b7 played {Theme.FormatDuration(Math.Max(1, seconds))}");
+            SetStatus($"{game.CardTitle} closed \u00b7 played {Look.FormatDuration(Math.Max(1, seconds))}");
             if (_store.Data.Sort is SortMode.RecentlyPlayed or SortMode.MostPlayed) RefreshView();
         }
 
@@ -2986,7 +2993,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+            Shell.OpenFolder(path);
         }
         catch (Exception ex)
         {
@@ -3016,49 +3023,50 @@ internal sealed class MainForm : Form
         }
 
         bool saved = await Task.Run(() => _store.Write(json, version));
-        if (!saved && !IsDisposed)
+        if (!saved && !_closed)
             SetStatus("Could not save launcher-data.json next to the launcher", transient: false);
     }
 
-    protected override void OnKeyDown(KeyEventArgs e)
+    private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.F5)
+        bool control = e.KeyModifiers.HasFlag(KeyModifiers.Control);
+        if (e.Key == Key.F5)
         {
-            e.SuppressKeyPress = true;
+            e.Handled = true;
             RefreshCurrentView();
         }
-        else if (e.Control && e.KeyCode is Keys.PageDown or Keys.PageUp && _pageCount > 1 && !_showingReleases)
+        else if (control && e.Key is Key.PageDown or Key.PageUp && _pageCount > 1 && !_showingReleases)
         {
-            e.SuppressKeyPress = true;
-            GoToPage(_page + (e.KeyCode == Keys.PageDown ? 1 : -1));
+            e.Handled = true;
+            GoToPage(_page + (e.Key == Key.PageDown ? 1 : -1));
         }
-        else if (e.Control && e.KeyCode == Keys.F)
+        else if (control && e.Key == Key.F)
         {
-            e.SuppressKeyPress = true;
+            e.Handled = true;
             _search.Focus();
         }
-        else if (e.KeyCode == Keys.Escape && _search.TextValue.Length > 0)
+        else if (e.Key == Key.Escape && _search.TextValue.Length > 0)
         {
-            e.SuppressKeyPress = true;
+            e.Handled = true;
             _search.TextValue = "";
         }
-        base.OnKeyDown(e);
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    protected override void OnClosing(WindowClosingEventArgs e)
     {
         _saveTimer.Stop();
         try
         {
-            var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            // The outer bounds in screen pixels while not maximized, as earlier versions saved them.
+            RememberNormalBounds();
             _store.Data.Window = new WindowState
             {
-                X = bounds.X,
-                Y = bounds.Y,
-                Width = bounds.Width,
-                Height = bounds.Height,
-                Maximized = WindowState == FormWindowState.Maximized,
-                Valid = true
+                X = _normalPosition.X,
+                Y = _normalPosition.Y,
+                Width = _normalSize.Width,
+                Height = _normalSize.Height,
+                Maximized = WindowState == Avalonia.Controls.WindowState.Maximized,
+                Valid = _normalSize.Width > 0
             };
             _store.Save();
         }
@@ -3075,26 +3083,25 @@ internal sealed class MainForm : Form
 
         _loadCts?.Cancel();
         _releaseCts?.Cancel();
-        base.OnFormClosing(e);
+        base.OnClosing(e);
     }
 
-    protected override void Dispose(bool disposing)
+    protected override void OnClosed(EventArgs e)
     {
-        if (disposing)
+        _closed = true;
+        _loadCts?.Cancel();
+        _loadCts?.Dispose();
+        _statusTimer.Stop();
+        _saveTimer.Stop();
+        _searchTimer.Stop();
+        _tagPopup?.Close();
+        _tagPicker?.Close();
+        foreach (var game in _games)
         {
-            _loadCts?.Cancel();
-            _loadCts?.Dispose();
-            _statusTimer.Dispose();
-            _saveTimer.Dispose();
-            _searchTimer.Dispose();
-            _toolTips.Dispose();
-            foreach (var game in _games)
-            {
-                game.Thumbnail?.Dispose();
-                game.FullThumbnail?.Dispose();
-            }
-            _games.Clear();
+            game.Thumbnail?.Dispose();
+            game.FullThumbnail?.Dispose();
         }
-        base.Dispose(disposing);
+        _games.Clear();
+        base.OnClosed(e);
     }
 }

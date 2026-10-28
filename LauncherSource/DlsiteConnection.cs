@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace RpgLauncher;
@@ -21,7 +22,7 @@ internal sealed class ProxySettings
 
     /// <summary>
     /// Network adapter to send DLsite connections through: an adapter name, or
-    /// <see cref="DlsiteConnection.AnyVpnAdapter"/>. Null lets Windows choose.
+    /// <see cref="DlsiteConnection.AnyVpnAdapter"/>. Null lets the system choose.
     /// </summary>
     public string? Adapter { get; set; }
 
@@ -39,9 +40,10 @@ internal static class DlsiteConnection
 
     private static readonly string[] Schemes = { "http", "socks4", "socks4a", "socks5" };
 
-    // Words that identify VPN tunnel adapters.
+    // Words that identify VPN tunnel adapters (Linux names them tun0, wg0, ppp0 and the like).
     private static readonly string[] VpnWords =
-        { "pia", "vpn", "wireguard", "wintun", "tap-windows", "tap adapter", "tunnel", "nordlynx", "mullvad", "proton" };
+        { "pia", "vpn", "wireguard", "wintun", "tap-windows", "tap adapter", "tunnel", "nordlynx", "mullvad", "proton",
+          "tun", "wg", "ppp" };
 
     /// <summary>Returns false with an error when the address is unusable; true with a null proxy means no proxy.</summary>
     public static bool TryCreateProxy(ProxySettings? settings, out IWebProxy? proxy, out string? error)
@@ -131,7 +133,11 @@ internal static class DlsiteConnection
     }
 
     /// <summary>IPv4 address of the chosen adapter, or null with an error when it isn't connected.</summary>
-    public static IPAddress? FindAdapterAddress(string adapter, out string? error)
+    public static IPAddress? FindAdapterAddress(string adapter, out string? error) =>
+        FindAdapter(adapter, out error) is { } nic ? IPv4Of(nic) : null;
+
+    /// <summary>The chosen adapter, or null with an error when it isn't connected.</summary>
+    private static NetworkInterface? FindAdapter(string adapter, out string? error)
     {
         error = null;
         var adapters = ConnectedAdapters().ToList();
@@ -139,7 +145,7 @@ internal static class DlsiteConnection
             ? adapters.FirstOrDefault(IsVpn)
             : adapters.FirstOrDefault(n => string.Equals(n.Name, adapter, StringComparison.OrdinalIgnoreCase));
 
-        if (match is not null) return IPv4Of(match);
+        if (match is not null) return match;
         error = adapter == AnyVpnAdapter
             ? "No VPN adapter is connected. Turn your VPN on, or choose another adapter."
             : $"The adapter \u201c{adapter}\u201d isn't connected. Is your VPN on?";
@@ -154,8 +160,8 @@ internal static class DlsiteConnection
     {
         return async (context, token) =>
         {
-            var local = FindAdapterAddress(adapter, out var error)
-                        ?? throw new HttpRequestException(error);
+            var nic = FindAdapter(adapter, out var error) ?? throw new HttpRequestException(error);
+            var local = IPv4Of(nic) ?? throw new HttpRequestException($"The adapter \u201c{nic.Name}\u201d has no address.");
 
             var host = context.DnsEndPoint.Host;
             var addresses = IPAddress.TryParse(host, out var literal)
@@ -166,6 +172,7 @@ internal static class DlsiteConnection
             try
             {
                 socket.Bind(new IPEndPoint(local, 0));
+                if (OperatingSystem.IsLinux()) BindToDevice(socket, nic.Name);
                 await socket.ConnectAsync(addresses, context.DnsEndPoint.Port, token).ConfigureAwait(false);
                 return new NetworkStream(socket, ownsSocket: true);
             }
@@ -175,6 +182,23 @@ internal static class DlsiteConnection
                 throw;
             }
         };
+    }
+
+    /// <summary>
+    /// Ties a socket to an adapter. Linux picks the route by destination, not by the bound address, so binding to the
+    /// adapter's address alone could still leave through another adapter. Allowed without root since Linux 5.7.
+    /// </summary>
+    private static void BindToDevice(Socket socket, string adapter)
+    {
+        const int SolSocket = 1, SoBindToDevice = 25;
+        try
+        {
+            socket.SetRawSocketOption(SolSocket, SoBindToDevice, Encoding.ASCII.GetBytes(adapter + "\0"));
+        }
+        catch (SocketException ex)
+        {
+            throw new HttpRequestException($"Linux wouldn't send this connection through \u201c{adapter}\u201d: {ex.Message}", ex);
+        }
     }
 
     /// <summary>Applies settings to every DLsite request; false with an error when the proxy is unusable.</summary>

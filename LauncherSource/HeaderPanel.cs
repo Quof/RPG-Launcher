@@ -1,101 +1,119 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
-internal sealed class HeaderPanel : Panel
+/// <summary>The window's header: gradient, logo and subtitle, under the buttons the main window places on it.</summary>
+internal sealed class HeaderPanel : ManualPanel, ICustomHitTest
 {
-    private readonly Font _logoFont = Theme.Font(19f, FontStyle.Bold);
-    private readonly Font _subtitleFont = Theme.Font(8.2f);
+    private static readonly UiFont LogoFont = Look.Font(19, bold: true);
+    private static readonly UiFont SubtitleFont = Look.Font(8.2);
 
+    private const double MascotHeight = 78;
+
+    private readonly Backdrop _backdrop;
     private string _subtitle = "";
+    private Bitmap? _mascot;
+
+    public HeaderPanel()
+    {
+        // The glow and the bottom border reach past the edges; WinForms clipped them to the panel.
+        ClipToBounds = true;
+        // Panel.Render is sealed in Avalonia, so the header is painted by a child kept first (under the others).
+        _backdrop = new Backdrop(this);
+        Children.Add(_backdrop);
+    }
 
     /// <summary>A drawing that peeks up beside the logo (Blob style); null for none.</summary>
-    public Bitmap? Mascot { get; set; }
-
-    private float MascotHeight => 78f * Theme.Scale(this);
-
-    /// <summary>Left edge of the logo text, after the mascot when one is shown.</summary>
-    private float LogoLeft
+    public Bitmap? Mascot
     {
-        get
+        get => _mascot;
+        set
         {
-            float scale = Theme.Scale(this);
-            if (Mascot is null) return 28f * scale;
-            return 16f * scale + Mascot.Width * MascotHeight / Mascot.Height + 12f * scale;
+            _mascot = value;
+            _backdrop.InvalidateVisual();
         }
     }
+
+    /// <summary>Left edge of the logo text, after the mascot when one is shown.</summary>
+    private double LogoLeft => Mascot is null ? 28 : 16 + Mascots.WidthAt(Mascot, MascotHeight) + 12;
+
     public string Subtitle
     {
         get => _subtitle;
         set
         {
             if (_subtitle == value) return;
-            _subtitle = value;
-            Invalidate();
+            _subtitle = value ?? "";
+            _backdrop.InvalidateVisual();
         }
     }
 
-    public HeaderPanel()
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    /// <summary>Bounds of the logo text in whole pixels, so controls can sit beside it.</summary>
+    public Rect LogoBounds()
     {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Bg;
+        var rpg = Look.Measure("RPG", LogoFont);
+        var launcher = Look.Measure("LAUNCHER", LogoFont);
+        return new Rect(Math.Floor(LogoLeft), 20, Math.Ceiling(rpg.Width) + 6 + Math.Ceiling(launcher.Width), Math.Ceiling(rpg.Height));
     }
 
-    /// <summary>Bounds of the logo text, so controls can sit beside it.</summary>
-    public Rectangle LogoBounds()
+    protected override Size ArrangeOverride(Size finalSize)
     {
-        float scale = Theme.Scale(this);
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-        var rpg = TextRenderer.MeasureText("RPG", _logoFont, new Size(int.MaxValue, int.MaxValue), flags);
-        var launcher = TextRenderer.MeasureText("LAUNCHER", _logoFont, new Size(int.MaxValue, int.MaxValue), flags);
-        int x = (int)LogoLeft, y = (int)(20f * scale);
-        return new Rectangle(x, y, rpg.Width + (int)(6f * scale) + launcher.Width, rpg.Height);
+        Place(_backdrop, new Rect(finalSize));
+        return base.ArrangeOverride(finalSize);
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        base.OnAttachedToVisualTree(e);
+        Look.Changed += _backdrop.InvalidateVisual;
+    }
 
-        using (var gradient = new LinearGradientBrush(ClientRectangle, Theme.HeaderTop, Theme.Bg, LinearGradientMode.Vertical))
-            g.FillRectangle(gradient, ClientRectangle);
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        Look.Changed -= _backdrop.InvalidateVisual;
+    }
 
-        float scale = Theme.Scale(this);
-        if (Theme.HeaderGlow.A > 0)
+    private void Paint(DrawingContext g)
+    {
+        double width = Bounds.Width, height = Bounds.Height;
+        g.FillRectangle(Look.Gradient(Look.HeaderTop, Look.Bg), new Rect(Bounds.Size));
+
+        if (Look.HeaderGlow.A > 0)
         {
-            using var glow = new SolidBrush(Theme.HeaderGlow);
-            g.FillEllipse(glow, -160f * scale, -200f * scale, 520f * scale, 380f * scale);
-            g.FillEllipse(glow, -80f * scale, -140f * scale, 360f * scale, 240f * scale);
+            var glow = Look.Brush(Look.HeaderGlow);
+            g.DrawEllipse(glow, null, new Rect(-160, -200, 520, 380));
+            g.DrawEllipse(glow, null, new Rect(-80, -140, 360, 240));
         }
 
         if (Mascot is not null)
-            Mascots.Draw(g, Mascot, 16f * scale, Height - 1, MascotHeight);
+            Mascots.Draw(g, Mascot, 16, height - 1, MascotHeight);
 
-        float x = LogoLeft;
-        float y = 20f * scale;
+        // On whole pixels, as WinForms placed them.
+        double x = Math.Floor(LogoLeft), y = 20;
+        var rpg = Look.Format("RPG", LogoFont, Look.Gold);
+        g.DrawText(rpg, new Point(x, y));
+        g.DrawText(Look.Format("LAUNCHER", LogoFont, Look.Text), new Point(x + Math.Ceiling(rpg.WidthIncludingTrailingWhitespace) + 6, y));
+        g.DrawText(Look.Format(_subtitle, SubtitleFont, Look.TextMuted), new Point(x + 1, y + 34));
 
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-        var rpgSize = TextRenderer.MeasureText(g, "RPG", _logoFont, new Size(int.MaxValue, int.MaxValue), flags);
-        TextRenderer.DrawText(g, "RPG", _logoFont, new Point((int)x, (int)y), Theme.Gold, flags);
-        TextRenderer.DrawText(g, "LAUNCHER", _logoFont,
-            new Point((int)(x + rpgSize.Width + 6f * scale), (int)y), Theme.Text, flags);
-
-        TextRenderer.DrawText(g, _subtitle, _subtitleFont,
-            new Point((int)(x + 1f * scale), (int)(y + 34f * scale)), Theme.TextMuted, flags);
-
-        using var border = new Pen(Theme.IsLight ? Theme.CardBorder : Theme.Divider, Theme.IsLight ? 2f : 1f);
-        g.DrawLine(border, 0, Height - 1, Width, Height - 1);
+        // on the last row of pixels
+        g.DrawLine(Look.Pen(Look.IsLight ? Look.CardBorder : Look.Divider, Look.IsLight ? 2 : 1),
+            new Point(0, height - 0.5), new Point(width, height - 0.5));
     }
 
-    protected override void Dispose(bool disposing)
+    /// <summary>Paints the header under the panel's other children.</summary>
+    private sealed class Backdrop : Control
     {
-        if (disposing)
+        private readonly HeaderPanel _owner;
+
+        public Backdrop(HeaderPanel owner)
         {
-            _logoFont.Dispose();
-            _subtitleFont.Dispose();
+            _owner = owner;
+            IsHitTestVisible = false;
         }
-        base.Dispose(disposing);
+
+        public override void Render(DrawingContext g) => _owner.Paint(g);
     }
 }

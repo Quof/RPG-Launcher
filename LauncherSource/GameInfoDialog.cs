@@ -1,22 +1,22 @@
-using System.Diagnostics;
+using Avalonia.Controls.Primitives;
 
 namespace RpgLauncher;
 
 /// <summary>Read-only details for a game and its cached store metadata.</summary>
-internal sealed class GameInfoDialog : Form
+internal sealed class GameInfoDialog : DialogWindow
 {
     private readonly GameMetadata _metadata;
     private readonly MetadataLanguage _language;
 
-    private readonly Font _titleFont = Theme.Font(16f, FontStyle.Bold);
-    private readonly Font _captionFont = Theme.Font(8f, FontStyle.Bold);
-    private readonly Font _valueFont = Theme.Font(9.5f);
-    private readonly Font _bodyFont = Theme.Font(9.5f);
-    private readonly Font _noteFont = Theme.Font(8.2f);
+    private readonly UiFont _titleFont = Look.Font(16, bold: true);
+    private readonly UiFont _captionFont = Look.Font(8, bold: true);
+    private readonly UiFont _valueFont = Look.Font(9.5);
+    private readonly UiFont _bodyFont = Look.Font(9.5);
+    private readonly UiFont _noteFont = Look.Font(8.2);
 
-    private int _pad;
-    private int _captionWidth;
-    private int _contentWidth;
+    private double _pad;
+    private double _captionWidth;
+    private double _contentWidth;
 
     public GameInfoDialog(GameEntry game, IEnumerable<(string Caption, string Value)>? extraRows = null,
         string? note = null)
@@ -24,32 +24,10 @@ internal sealed class GameInfoDialog : Form
         _metadata = game.Metadata ?? new GameMetadata();
         _language = game.MetadataLanguage;
 
-        Text = "Game info";
-        BackColor = Theme.Bg;
-        ForeColor = Theme.Text;
-        Font = Theme.Font(9f);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        StartPosition = FormStartPosition.CenterParent;
-        MaximizeBox = false;
-        MinimizeBox = false;
-        ShowInTaskbar = false;
-        ShowIcon = false;
-        AutoScaleMode = AutoScaleMode.None;
-        KeyPreview = true;
-
-        TitleLabel = new Label
-        {
-            Font = _titleFont,
-            ForeColor = Theme.Text,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true
-        };
-        Controls.Add(TitleLabel);
+        Title = "Game info";
 
         // The game's own title (with version), so it stays identifiable when the card shows the store title.
-        TitleLabel.Text = game.DisplayTitle;
+        TitleLabel = Ui.Label(game.DisplayTitle, _titleFont, Look.Text);
 
         string type = _metadata.WorkTypeFor(_language);
         string typeName = _metadata.WorkTypeNameFor(_language);
@@ -72,85 +50,58 @@ internal sealed class GameInfoDialog : Form
         }
         AddRow("TAGS", string.Join(" \u00b7 ", game.Tags.Where(tag => !string.IsNullOrWhiteSpace(tag))), 40);
 
-        DescriptionLabel = new Label
-        {
-            Text = "ABOUT",
-            Font = _captionFont,
-            ForeColor = Theme.TextDim,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        DescriptionPanel = new Panel
-        {
-            BackColor = Theme.Card,
-            Padding = new Padding(12, 8, 12, 8)
-        };
-        DescriptionBox = new TextBox
+        DescriptionLabel = Ui.Label("ABOUT", _captionFont, Look.TextDim);
+        DescriptionBox = new SelectableTextBlock
         {
             Text = _metadata.DescriptionFor(_language) ?? "",
-            Font = _bodyFont,
-            ForeColor = Theme.TextMuted,
-            BackColor = Theme.Card,
-            BorderStyle = BorderStyle.None,
-            Multiline = true,
-            ReadOnly = true,
-            WordWrap = true,
-            // The native scrollbar is light even on a dark form, so the box is sized to the text instead.
-            ScrollBars = ScrollBars.None,
-            Dock = DockStyle.Fill,
-            TabStop = false
+            Foreground = Look.Brush(Look.TextMuted),
+            SelectionBrush = Look.Brush(Look.AccentBorder),
+            TextWrapping = TextWrapping.Wrap
         };
-        DescriptionPanel.Controls.Add(DescriptionBox);
-        Controls.Add(DescriptionLabel);
-        Controls.Add(DescriptionPanel);
+        _bodyFont.ApplyTo(DescriptionBox);
+        KeyboardNavigation.SetIsTabStop(DescriptionBox, false);
+        DescriptionPanel = new Border
+        {
+            Background = Look.Brush(Look.Card),
+            Padding = new Thickness(12, 8, 12, 8),
+            // The box is sized to the text up to a limit; longer text scrolls.
+            Child = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = DescriptionBox
+            }
+        };
         bool hasDescription = !string.IsNullOrWhiteSpace(_metadata.DescriptionFor(_language));
-        DescriptionLabel.Visible = hasDescription;
-        DescriptionPanel.Visible = hasDescription;
+        DescriptionLabel.IsVisible = hasDescription;
+        DescriptionPanel.IsVisible = hasDescription;
 
-        NoteLabel = new Label
-        {
-            Font = _noteFont,
-            ForeColor = Theme.TextDim,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Text = note ?? ""
-        };
-        Controls.Add(NoteLabel);
+        NoteLabel = Ui.Label(note ?? "", _noteFont, Look.TextDim);
 
-        Link = new LinkLabel
+        Link = Ui.Link("Open DLsite page", _valueFont, Look.Gold, OpenStorePage);
+        // Brighter while pressed, like the LinkLabel's ActiveLinkColor.
+        Link.PointerPressed += (_, e) =>
         {
-            Text = "Open DLsite page",
-            Font = _valueFont,
-            LinkColor = Theme.Gold,
-            ActiveLinkColor = Theme.GoldBright,
-            VisitedLinkColor = Theme.Gold,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-            BackColor = Color.Transparent,
-            AutoSize = true,
-            Cursor = Cursors.Hand
+            if (e.GetCurrentPoint(Link).Properties.IsLeftButtonPressed) Link.Foreground = Look.Brush(Look.GoldBright);
         };
-        Link.LinkClicked += (_, _) => OpenStorePage();
-        Controls.Add(Link);
+        Link.PointerReleased += (_, _) => Link.Foreground = Look.Brush(Look.Gold);
+        Link.PointerCaptureLost += (_, _) => Link.Foreground = Look.Brush(Look.Gold);
 
         CloseButton = new PillButton { Text = "Close" };
-        CloseButton.Click += (_, _) => Close();
-        Controls.Add(CloseButton);
+        CloseButton.Click += (_, _) => Cancel();
 
-        KeyDown += (_, e) =>
-        {
-            if (e.KeyCode == Keys.Escape) Close();
-        };
+        var backdrop = new Backdrop(PaintBackdrop);
+        Body.Children.AddRange(new Control[] { backdrop, TitleLabel, DescriptionLabel, DescriptionPanel, NoteLabel, Link, CloseButton });
+        LayoutDialog(backdrop);
     }
 
-    private Label TitleLabel { get; }
+    private TextBlock TitleLabel { get; }
     private List<(string Caption, string Value, int Height)> InfoRows { get; }
-    private Label DescriptionLabel { get; }
-    private Panel DescriptionPanel { get; }
-    private TextBox DescriptionBox { get; }
-    private Label NoteLabel { get; }
-    private LinkLabel Link { get; }
+    private TextBlock DescriptionLabel { get; }
+    private Border DescriptionPanel { get; }
+    private SelectableTextBlock DescriptionBox { get; }
+    private TextBlock NoteLabel { get; }
+    private TextBlock Link { get; }
     private PillButton CloseButton { get; }
 
     private void AddRow(string caption, string value, int height = 0)
@@ -159,137 +110,142 @@ internal sealed class GameInfoDialog : Form
         InfoRows.Add((caption, value, height <= 0 ? 22 : height));
     }
 
-    protected override void OnHandleCreated(EventArgs e)
+    private void LayoutDialog(Control backdrop)
     {
-        base.OnHandleCreated(e);
-        try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
-    }
-
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        LayoutDialog(Theme.Scale(this));
-        CenterToParent();
-    }
-
-    private void LayoutDialog(float scale)
-    {
-        int R(float value) => (int)Math.Round(value * scale);
-
-        _pad = R(24f);
-        _captionWidth = R(92f);
-        int width = R(600f);
+        _pad = 24;
+        _captionWidth = 92;
+        double width = 600;
         _contentWidth = width - _pad * 2;
 
-        int titleHeight = R(50f);
-        int valueWidth = _contentWidth - _captionWidth;
+        double titleHeight = 50;
+        double valueWidth = _contentWidth - _captionWidth;
 
-        // Multi-line rows grow to fit; measure narrower because the label wraps earlier than TextRenderer reports.
-        int measureWidth = Math.Max(R(60f), valueWidth - R(24f));
+        // Multi-line rows grow to fit; measured narrower, as the WinForms label wrapped earlier than TextRenderer reported.
+        double measureWidth = Math.Max(60, valueWidth - 24);
         var rowHeights = InfoRows
             .Select(row =>
             {
-                int height = R(row.Height);
+                double height = row.Height;
                 if (row.Height <= 22) return height;
-                var measured = TextRenderer.MeasureText(row.Value, _valueFont,
-                    new Size(measureWidth, int.MaxValue),
-                    TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-                return Math.Max(height, measured.Height + R(8f));
+                var measured = Look.Format(row.Value, _valueFont, Look.TextMuted);
+                measured.MaxTextWidth = measureWidth;
+                return Math.Max(height, Math.Ceiling(measured.Height) + 8);
             })
             .ToList();
-        int rowsHeight = rowHeights.Sum(height => height + R(4f));
+        double rowsHeight = rowHeights.Sum(height => height + 4);
 
-        int descPanelHeight = 0;
-        if (DescriptionPanel.Visible)
+        double descPanelHeight = 0;
+        if (DescriptionPanel.IsVisible)
         {
-            int innerWidth = Math.Max(1, _contentWidth - R(24f));
-            var measured = TextRenderer.MeasureText(DescriptionBox.Text, _bodyFont,
-                new Size(innerWidth, int.MaxValue),
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-            descPanelHeight = Math.Clamp(measured.Height + R(18f), R(54f), R(210f));
+            double innerWidth = Math.Max(1, _contentWidth - 24);
+            var measured = Look.Format(DescriptionBox.Text ?? "", _bodyFont, Look.TextMuted);
+            measured.MaxTextWidth = innerWidth;
+            descPanelHeight = Math.Clamp(Math.Ceiling(measured.Height) + 18, 54, 210);
         }
 
-        int buttonHeight = R(38f);
-        int height = _pad
-            + titleHeight - R(6f)
-            + R(6f)
-            + Math.Max(1, R(1f)) + R(12f)
+        double buttonHeight = 38;
+        double height = _pad
+            + titleHeight - 6
+            + 6
+            + 1 + 12
             + rowsHeight
-            + (DescriptionPanel.Visible ? R(8f) + R(18f) + R(4f) + descPanelHeight : 0)
-            + (string.IsNullOrEmpty(NoteLabel.Text) ? R(12f) : R(16f) + R(18f) + R(4f))
+            + (DescriptionPanel.IsVisible ? 8 + 18 + 4 + descPanelHeight : 0)
+            + (string.IsNullOrEmpty(NoteLabel.Text) ? 12 : 16 + 18 + 4)
             + buttonHeight + _pad;
 
-        ClientSize = new Size(width, height);
+        SetClientSize(width, height);
 
-        int y = _pad;
-        TitleLabel.SetBounds(_pad, y, _contentWidth, titleHeight);
-        y += titleHeight - R(6f);
-        y += R(6f);
+        var divider = new Border { Background = Look.Brush(Look.CardBorder), IsHitTestVisible = false };
+        Body.Children.Add(divider);
 
-        var divider = new Panel { BackColor = Theme.CardBorder };
-        divider.SetBounds(_pad, y, _contentWidth, Math.Max(1, R(1f)));
-        Controls.Add(divider);
-        y += R(12f);
-
+        var rows = new List<(TextBlock Caption, TextBlock Value, double Height)>();
         int rowIndex = 0;
         foreach (var row in InfoRows)
         {
-            int rowHeight = rowHeights[rowIndex++];
-            var caption = new Label
+            double rowHeight = rowHeights[rowIndex++];
+            var caption = Ui.Label(row.Caption, _captionFont, Look.TextDim);
+            TextBlock value;
+            if (row.Height > 22)
             {
-                Text = row.Caption,
-                Font = _captionFont,
-                ForeColor = Theme.TextDim,
-                BackColor = Color.Transparent,
-                AutoSize = false,
                 // Tall rows align the caption with the value's first line.
-                TextAlign = row.Height > 22 ? ContentAlignment.TopLeft : ContentAlignment.MiddleLeft,
-                Padding = row.Height > 22 ? new Padding(0, R(3f), 0, 0) : Padding.Empty
-            };
-            caption.SetBounds(_pad, y, _captionWidth, rowHeight);
-
-            var value = new Label
+                caption.VerticalAlignment = VerticalAlignment.Top;
+                caption.Padding = new Thickness(0, 3, 0, 0);
+                value = Ui.Paragraph(row.Value, _valueFont, Look.TextMuted);
+            }
+            else
             {
-                Text = row.Value,
-                Font = _valueFont,
-                ForeColor = Theme.TextMuted,
-                BackColor = Color.Transparent,
-                AutoSize = false,
-                TextAlign = row.Height > 22 ? ContentAlignment.TopLeft : ContentAlignment.MiddleLeft,
-                AutoEllipsis = row.Height <= 22
-            };
-            value.SetBounds(_pad + _captionWidth, y, _contentWidth - _captionWidth, rowHeight);
-            Controls.Add(caption);
-            Controls.Add(value);
-            y += rowHeight + R(4f);
+                value = Ui.Label(row.Value, _valueFont, Look.TextMuted);
+                TipWhenTrimmed(value, _valueFont, _contentWidth - _captionWidth);
+            }
+            Body.Children.Add(caption);
+            Body.Children.Add(value);
+            rows.Add((caption, value, rowHeight));
         }
 
-        int buttonWidth = R(96f);
-        int footerTop = ClientSize.Height - _pad - buttonHeight;
+        TipWhenTrimmed(TitleLabel, _titleFont, _contentWidth);
+        NoteLabel.IsVisible = !string.IsNullOrEmpty(NoteLabel.Text);
+        var linkSize = Look.Measure(Link.Text ?? "", _valueFont);
+        double linkW = Math.Ceiling(linkSize.Width) + 2, linkH = Math.Ceiling(linkSize.Height);
 
-        NoteLabel.SetBounds(_pad, footerTop - R(22f), _contentWidth, R(18f));
-        NoteLabel.Visible = !string.IsNullOrEmpty(NoteLabel.Text);
-        Link.Location = new Point(_pad, footerTop + (buttonHeight - Link.Height) / 2);
-        CloseButton.Bounds = new Rectangle(ClientSize.Width - _pad - buttonWidth,
-            footerTop, buttonWidth, buttonHeight);
-
-        if (DescriptionPanel.Visible)
+        Body.Layout = size =>
         {
-            int aboutTop = y + R(8f);
-            DescriptionLabel.SetBounds(_pad, aboutTop, _contentWidth, R(18f));
-            int descTop = aboutTop + R(22f);
-            DescriptionPanel.SetBounds(_pad, descTop, _contentWidth, descPanelHeight);
+            Body.Place(backdrop, 0, 0, size.Width, size.Height);
+
+            double y = _pad;
+            Body.Place(TitleLabel, _pad, y, _contentWidth, titleHeight);
+            y += titleHeight - 6;
+            y += 6;
+
+            Body.Place(divider, _pad, y, _contentWidth, 1);
+            y += 12;
+
+            foreach (var (caption, value, rowHeight) in rows)
+            {
+                Body.Place(caption, _pad, y, _captionWidth, rowHeight);
+                Body.Place(value, _pad + _captionWidth, y, _contentWidth - _captionWidth, rowHeight);
+                y += rowHeight + 4;
+            }
+
+            double buttonWidth = 96;
+            double footerTop = size.Height - _pad - buttonHeight;
+
+            Body.Place(NoteLabel, _pad, footerTop - 22, _contentWidth, 18);
+            Body.Place(Link, _pad, footerTop + (buttonHeight - linkH) / 2, linkW, linkH);
+            Body.Place(CloseButton, size.Width - _pad - buttonWidth, footerTop, buttonWidth, buttonHeight);
+
+            if (DescriptionPanel.IsVisible)
+            {
+                double aboutTop = y + 8;
+                Body.Place(DescriptionLabel, _pad, aboutTop, _contentWidth, 18);
+                double descTop = aboutTop + 22;
+                Body.Place(DescriptionPanel, _pad, descTop, _contentWidth, descPanelHeight);
+            }
+        };
+    }
+
+    /// <summary>Shows the whole text as a tooltip when it is cut off, as a WinForms label with AutoEllipsis did.</summary>
+    private static void TipWhenTrimmed(TextBlock label, UiFont font, double width)
+    {
+        if (Look.Measure(label.Text ?? "", font).Width <= width) return;
+        label.IsHitTestVisible = true;
+        label.Background = Brushes.Transparent;
+        Ui.Tip(label, label.Text);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            Cancel();
         }
     }
 
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        // Blob style: a blob sits between the store link and Close.
-        float scale = Theme.Scale(this);
-        Mascots.DrawCentered(e.Graphics, MascotSpot.InfoDialog, (Link.Right + CloseButton.Left) / 2f,
-            ClientSize.Height, 56f * scale);
-    }
+    // Blob style: a blob sits between the store link and Close.
+    private void PaintBackdrop(DrawingContext g, Size size) =>
+        Mascots.DrawCentered(g, MascotSpot.InfoDialog, (Body.PlaceOf(Link).Right + Body.PlaceOf(CloseButton).Left) / 2,
+            size.Height, 56);
 
     private void OpenStorePage()
     {
@@ -297,7 +253,7 @@ internal sealed class GameInfoDialog : Form
         if (!WebLinks.IsTrusted(url)) return;
         try
         {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Shell.OpenUrl(url);
         }
         catch
         {
@@ -305,16 +261,17 @@ internal sealed class GameInfoDialog : Form
         }
     }
 
-    protected override void Dispose(bool disposing)
+    /// <summary>Paints under the dialog's controls, as the form's OnPaint did.</summary>
+    private sealed class Backdrop : Control
     {
-        if (disposing)
+        private readonly Action<DrawingContext, Size> _paint;
+
+        public Backdrop(Action<DrawingContext, Size> paint)
         {
-            _titleFont.Dispose();
-            _captionFont.Dispose();
-            _valueFont.Dispose();
-            _bodyFont.Dispose();
-            _noteFont.Dispose();
+            _paint = paint;
+            IsHitTestVisible = false;
         }
-        base.Dispose(disposing);
+
+        public override void Render(DrawingContext g) => _paint(g, Bounds.Size);
     }
 }

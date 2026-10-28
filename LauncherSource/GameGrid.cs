@@ -1,35 +1,41 @@
-﻿using System.Drawing.Drawing2D;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
-internal sealed class GameGrid : Panel
+/// <summary>The library: a scrolling grid of <see cref="GameCard"/>s, with its own scrollbar and empty state.</summary>
+internal sealed class GameGrid : Control, ICustomHitTest
 {
+    private const double Side = 26;
+    private const double Gap = 18;
+    private const double Top = 22;
+    private const double Bottom = 26;
+    private const double Reserve = 14;
+
     private readonly Dictionary<string, GameCard> _cards = new(StringComparer.OrdinalIgnoreCase);
     private List<GameEntry> _all = new();
     private List<GameEntry> _visible = new();
     private HashSet<GameCard> _shown = new();
     private GameCard? _hoverCard;
     private Point _lastMouse = new(-1, -1);
-    private readonly Font _emptyTitleFont = Theme.Font(15f, FontStyle.Bold);
-    private readonly Font _emptyTextFont = Theme.Font(9.5f);
+    private readonly UiFont _emptyTitleFont = Look.Font(15, bold: true);
+    private readonly UiFont _emptyTextFont = Look.Font(9.5);
+    private readonly Cursor _hand = new(StandardCursorType.Hand);
 
-    private int _scroll;
-    private int _maxScroll;
-    private int _contentHeight;
+    private double _scroll;
+    private double _maxScroll;
+    private double _contentHeight;
 
     private bool _scrollbarHover;
     private bool _dragging;
-    private int _dragAnchorY;
-    private int _dragThumbStartY;
+    private double _dragAnchorY;
+    private double _dragThumbStartY;
+    private bool _pressed;
 
     // layout cache
     private int _cols = 1;
-    private int _cardWidth;
-    private int _cardHeight;
-    private int _startX;
-    private int _gap;
-    private int _top;
-    private int _side;
+    private double _cardWidth;
+    private double _cardHeight;
+    private double _startX;
 
     public event Action<GameEntry>? PlayRequested;
     public event Action<GameEntry>? CheatsRequested;
@@ -46,11 +52,8 @@ internal sealed class GameGrid : Panel
 
     public GameGrid()
     {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        AutoScroll = false;
-        BackColor = Theme.Bg;
-        DoubleBuffered = true;
+        // Cards scrolled partly out of view must not draw over the controls around the grid.
+        ClipToBounds = true;
     }
 
     public GameCard? GetCard(string key) => _cards.TryGetValue(key, out var card) ? card : null;
@@ -66,7 +69,7 @@ internal sealed class GameGrid : Panel
             _cards.Remove(key);
             _shown.Remove(card);
             if (ReferenceEquals(_hoverCard, card)) _hoverCard = null;
-            card.Dispose();
+            card.Visible = false;
         }
 
         foreach (var game in all)
@@ -107,7 +110,7 @@ internal sealed class GameGrid : Panel
     public void ResetArtwork()
     {
         foreach (var card in _cards.Values) card.ResetArtwork();
-        Invalidate();
+        InvalidateVisual();
     }
 
     public void RefreshCard(GameEntry game)
@@ -124,70 +127,66 @@ internal sealed class GameGrid : Panel
         Relayout();
     }
 
+    /// <summary>Scrolls by a wheel delta in WinForms units: 120 per notch.</summary>
     public void ScrollByWheel(int delta)
     {
         if (_maxScroll <= 0) return;
-        float scale = Theme.Scale(this);
-        int step = (int)Math.Round(delta / 120f * 96f * scale);
-        int scroll = Math.Clamp(_scroll - step, 0, _maxScroll);
+        double step = Math.Round(delta / 120.0 * 96);
+        double scroll = Math.Clamp(_scroll - step, 0, _maxScroll);
         if (scroll == _scroll) return;
         _scroll = scroll;
         Relayout();
     }
 
-    protected override void OnMouseWheel(MouseEventArgs e)
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
-        ScrollByWheel(e.Delta);
-        base.OnMouseWheel(e);
+        ScrollByWheel((int)Math.Round(e.Delta.Y * 120));
+        e.Handled = true;
+        base.OnPointerWheelChanged(e);
     }
 
     private void Relayout(bool resetScroll = false)
     {
-        if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+        double width = Bounds.Width, height = Bounds.Height;
+        if (width <= 0 || height <= 0) return;
 
-        float scale = Theme.Scale(this);
-        _side = (int)Math.Round(26f * scale);
-        _gap = (int)Math.Round(18f * scale);
-        _top = (int)Math.Round(22f * scale);
-        int bottom = (int)Math.Round(26f * scale);
-        int reserve = (int)Math.Round(14f * scale);
-
-        int available = Math.Max(1, ClientSize.Width - _side * 2 - reserve);
+        double available = Math.Max(1, width - Side * 2 - Reserve);
         // Square cards are narrower: four to a row in a default-size window.
-        int minWidth = (int)Math.Round((GameCard.SquareCards ? 236f : 300f) * scale);
-        int maxWidth = (int)Math.Round((GameCard.SquareCards ? 300f : 400f) * scale);
+        double minWidth = GameCard.SquareCards ? 236 : 300;
+        double maxWidth = GameCard.SquareCards ? 300 : 400;
 
-        _cols = Math.Max(1, (available + _gap) / Math.Max(1, minWidth + _gap));
-        while (_cols > 1 && (available - _gap * (_cols - 1)) / _cols < minWidth) _cols--;
-        _cardWidth = Math.Max(1, (available - _gap * (_cols - 1)) / _cols);
+        _cols = Math.Max(1, (int)((available + Gap) / (minWidth + Gap)));
+        while (_cols > 1 && (available - Gap * (_cols - 1)) / _cols < minWidth) _cols--;
+        _cardWidth = Math.Max(1, Math.Floor((available - Gap * (_cols - 1)) / _cols));
         _cardWidth = Math.Min(_cardWidth, maxWidth);
-        _cardHeight = GameCard.MeasureHeight(_cardWidth, scale);
+        _cardHeight = GameCard.MeasureHeight(_cardWidth);
 
         int rows = _visible.Count == 0 ? 0 : (_visible.Count + _cols - 1) / _cols;
         _contentHeight = rows == 0
             ? 0
-            : _top + rows * _cardHeight + Math.Max(0, rows - 1) * _gap + bottom;
+            : Top + rows * _cardHeight + Math.Max(0, rows - 1) * Gap + Bottom;
 
-        int totalWidth = _cols * _cardWidth + Math.Max(0, _cols - 1) * _gap;
-        _startX = _side + Math.Max(0, (available - totalWidth) / 2);
-        _maxScroll = Math.Max(0, _contentHeight - ClientSize.Height);
+        double totalWidth = _cols * _cardWidth + Math.Max(0, _cols - 1) * Gap;
+        _startX = Side + Math.Max(0, Math.Floor((available - totalWidth) / 2));
+        _maxScroll = Math.Max(0, _contentHeight - height);
 
         if (resetScroll) _scroll = 0;
         _scroll = Math.Clamp(_scroll, 0, _maxScroll);
 
         PositionCards();
-        Invalidate();
+        InvalidateVisual();
     }
 
     /// <summary>Positions the cards in view and hides those that left it; other cards are not touched.</summary>
     private void PositionCards()
     {
         var shown = new HashSet<GameCard>();
-        int rowStride = _cardHeight + _gap;
+        double rowStride = _cardHeight + Gap;
+        double height = Bounds.Height;
         if (_visible.Count > 0 && rowStride > 0)
         {
-            int firstRow = Math.Max(0, (_scroll - _top - _cardHeight) / rowStride);
-            int lastRow = Math.Max(0, (_scroll + ClientSize.Height - _top) / rowStride);
+            int firstRow = Math.Max(0, (int)((_scroll - Top - _cardHeight) / rowStride));
+            int lastRow = Math.Max(0, (int)((_scroll + height - Top) / rowStride));
             int first = firstRow * _cols;
             int last = Math.Min(_visible.Count - 1, (lastRow + 1) * _cols - 1);
 
@@ -196,10 +195,10 @@ internal sealed class GameGrid : Panel
                 if (!_cards.TryGetValue(_visible[i].Key, out var card)) continue;
                 int col = i % _cols;
                 int row = i / _cols;
-                int x = _startX + col * (_cardWidth + _gap);
-                int y = _top + row * rowStride - _scroll;
-                if (y + _cardHeight <= 0 || y >= ClientSize.Height) continue;
-                card.Bounds = new Rectangle(x, y, _cardWidth, _cardHeight);
+                double x = _startX + col * (_cardWidth + Gap);
+                double y = Top + row * rowStride - _scroll;
+                if (y + _cardHeight <= 0 || y >= height) continue;
+                card.Bounds = new Rect(x, y, _cardWidth, _cardHeight);
                 card.Visible = true;
                 shown.Add(card);
             }
@@ -237,29 +236,25 @@ internal sealed class GameGrid : Panel
 
         bool hand = card is not null &&
             card.MouseMove(new Point(point.X - card.Bounds.X, point.Y - card.Bounds.Y));
-        Cursor = hand || IsOverScrollbar(point) ? Cursors.Hand : Cursors.Default;
+        Cursor = hand || IsOverScrollbar(point) ? _hand : Cursor.Default;
     }
 
-    protected override void OnResize(EventArgs eventargs)
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
-        base.OnResize(eventargs);
+        base.OnSizeChanged(e);
         Relayout();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    public override void Render(DrawingContext g)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        using (var brush = new SolidBrush(Theme.Bg)) g.FillRectangle(brush, ClientRectangle);
+        g.FillRectangle(Look.Brush(Look.Bg), new Rect(Bounds.Size));
 
         foreach (var card in _shown)
         {
-            if (!card.Bounds.IntersectsWith(e.ClipRectangle)) continue;
-            var state = g.Save();
-            g.TranslateTransform(card.Bounds.X, card.Bounds.Y);
-            card.Paint(g);
-            g.Restore(state);
+            using (g.PushTransform(Matrix.CreateTranslation(card.Bounds.X, card.Bounds.Y)))
+                card.Paint(g);
         }
 
         if (_visible.Count == 0)
@@ -273,45 +268,34 @@ internal sealed class GameGrid : Panel
         }
     }
 
-    private void DrawBackdrop(Graphics g)
+    private void DrawBackdrop(DrawingContext g)
     {
-        if (ClientSize.Width < 20 || ClientSize.Height < 20) return;
-        using var brush = new SolidBrush(Theme.HeaderGlow);
-        float width = Math.Min(ClientSize.Width * 0.7f, 900f);
-        g.FillEllipse(brush, (ClientSize.Width - width) / 2f, -ClientSize.Height * 0.55f, width, ClientSize.Height * 0.75f);
+        double width = Bounds.Width, height = Bounds.Height;
+        if (width < 20 || height < 20) return;
+        double w = Math.Min(width * 0.7, 900);
+        g.DrawEllipse(Look.Brush(Look.HeaderGlow), null, new Rect((width - w) / 2, -height * 0.55, w, height * 0.75));
     }
 
-    private void DrawEmptyState(Graphics g)
+    private void DrawEmptyState(DrawingContext g)
     {
-        float scale = Theme.Scale(this);
+        double width = Bounds.Width, height = Bounds.Height;
         bool filtered = _all.Count > 0;
 
-        float cardW = Math.Min(ClientSize.Width - 80f * scale, 560f * scale);
-        float centerX = ClientSize.Width / 2f;
-        float centerY = ClientSize.Height / 2f - 40f * scale;
+        double cardW = Math.Min(width - 80, 560);
+        double centerX = width / 2;
+        double centerY = height / 2 - 40;
 
-        var iconRect = new RectangleF(centerX - 34f * scale, centerY - 92f * scale, 68f * scale, 68f * scale);
-        if (Theme.Style == UiStyle.Blob && Mascots.Empty is { } blob)
+        var iconRect = new Rect(centerX - 34, centerY - 92, 68, 68);
+        if (Look.Style == UiStyle.Blob && Mascots.Empty is { } blob)
         {
-            float h = 110f * scale;
-            Mascots.Draw(g, blob, centerX - blob.Width * h / blob.Height / 2f, centerY - 8f * scale, h);
+            double h = 110;
+            Mascots.Draw(g, blob, centerX - Mascots.WidthAt(blob, h) / 2, centerY - 8, h);
         }
         else
         {
-        using (var iconPath = Theme.Rounded(iconRect, 19f * scale))
-        using (var brush = new SolidBrush(Theme.Card))
-        {
-            g.FillPath(brush, iconPath);
-            using var border = new Pen(Theme.CardBorder, 1f);
-            g.DrawPath(border, iconPath);
-        }
-
-        using (var heart = Theme.Star(new RectangleF(iconRect.Left + 22f * scale, iconRect.Top + 22f * scale,
-                   24f * scale, 24f * scale)))
-        using (var brush = new SolidBrush(Theme.AccentBorder))
-        {
-            g.FillPath(brush, heart);
-        }
+            g.DrawRectangle(Look.Brush(Look.Card), Look.Pen(Look.CardBorder, 1), Look.Rounded(iconRect, 19));
+            g.DrawGeometry(Look.Brush(Look.AccentBorder), null,
+                Look.Star(new Rect(iconRect.Left + 22, iconRect.Top + 22, 24, 24)));
         }
 
         string title = filtered ? "No games match your filters" : "No games found";
@@ -319,73 +303,54 @@ internal sealed class GameGrid : Panel
             ? "Try a different search, tag or group, or turn off the Favorites filter."
             : "Place your RPG Maker MV / MZ game folders in this directory, then press Rescan.";
 
-        var titleRect = new RectangleF(centerX - cardW / 2f, centerY, cardW, 30f * scale);
-        Theme.DrawText(g, title, _emptyTitleFont, Theme.Text, titleRect, StringAlignment.Center);
+        var titleRect = new Rect(centerX - cardW / 2, centerY, cardW, 30);
+        Look.DrawText(g, title, _emptyTitleFont, Look.Text, titleRect, TextAlignment.Center);
 
-        var textRect = new RectangleF(centerX - cardW / 2f, centerY + 34f * scale, cardW, 46f * scale);
-        using (var format = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Near,
-            Trimming = StringTrimming.Word
-        })
-        using (var brush = new SolidBrush(Theme.TextMuted))
-        {
-            g.DrawString(text, _emptyTextFont, brush, textRect, format);
-        }
+        var textRect = new Rect(centerX - cardW / 2, centerY + 34, cardW, 46);
+        Look.DrawText(g, text, _emptyTextFont, Look.TextMuted, textRect, TextAlignment.Center, TextLine.Top, wrap: true);
     }
 
-    private RectangleF GetScrollThumb()
+    private Rect GetScrollThumb()
     {
-        float scale = Theme.Scale(this);
-        float trackTop = 12f * scale;
-        float trackHeight = Math.Max(1f, ClientSize.Height - 24f * scale);
-        float thumbHeight = Math.Max(36f * scale, trackHeight * ClientSize.Height / Math.Max(1f, _contentHeight));
+        double height = Bounds.Height;
+        double trackTop = 12;
+        double trackHeight = Math.Max(1, height - 24);
+        double thumbHeight = Math.Max(36, trackHeight * height / Math.Max(1, _contentHeight));
         thumbHeight = Math.Min(thumbHeight, trackHeight);
-        float progress = _maxScroll <= 0 ? 0f : _scroll / (float)_maxScroll;
-        float thumbY = trackTop + (trackHeight - thumbHeight) * progress;
-        return new RectangleF(ClientSize.Width - 12f * scale, thumbY, 5f * scale, thumbHeight);
+        double progress = _maxScroll <= 0 ? 0 : _scroll / _maxScroll;
+        double thumbY = trackTop + (trackHeight - thumbHeight) * progress;
+        return new Rect(Bounds.Width - 12, thumbY, 5, thumbHeight);
     }
 
-    private void DrawScrollbar(Graphics g)
+    private void DrawScrollbar(DrawingContext g)
     {
-        float scale = Theme.Scale(this);
         var thumb = GetScrollThumb();
         bool active = _scrollbarHover || _dragging;
-        using (var track = new SolidBrush(Theme.ScrollTrack))
-        {
-            using var path = Theme.Rounded(new RectangleF(thumb.Left, 12f * scale, thumb.Width,
-                Math.Max(1f, ClientSize.Height - 24f * scale)), thumb.Width / 2f);
-            g.FillPath(track, path);
-        }
-        using (var brush = new SolidBrush(active
-                   ? Theme.ScrollThumbActive
-                   : Theme.ScrollThumb))
-        using (var path = Theme.Rounded(thumb, thumb.Width / 2f))
-        {
-            g.FillPath(brush, path);
-        }
+        g.DrawRectangle(Look.Brush(Look.ScrollTrack), null,
+            Look.Rounded(new Rect(thumb.Left, 12, thumb.Width, Math.Max(1, Bounds.Height - 24)), thumb.Width / 2));
+        g.DrawRectangle(Look.Brush(active ? Look.ScrollThumbActive : Look.ScrollThumb), null,
+            Look.Rounded(thumb, thumb.Width / 2));
     }
 
     private bool IsOverScrollbar(Point point)
     {
         if (_maxScroll <= 0) return false;
-        float scale = Theme.Scale(this);
-        var hit = new RectangleF(ClientSize.Width - 22f * scale, 0, 22f * scale, ClientSize.Height);
+        var hit = new Rect(Bounds.Width - 22, 0, 22, Bounds.Height);
         return hit.Contains(point);
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPointerMoved(PointerEventArgs e)
     {
+        base.OnPointerMoved(e);
+        var point = e.GetPosition(this);
         if (_dragging)
         {
-            float scale = Theme.Scale(this);
-            float trackTop = 12f * scale;
-            float trackHeight = Math.Max(1f, ClientSize.Height - 24f * scale);
+            double trackTop = 12;
+            double trackHeight = Math.Max(1, Bounds.Height - 24);
             var thumb = GetScrollThumb();
-            float travel = Math.Max(1f, trackHeight - thumb.Height);
-            float newY = Math.Clamp(_dragThumbStartY + (e.Y - _dragAnchorY), trackTop, trackTop + travel);
-            int scroll = (int)Math.Round((newY - trackTop) / travel * _maxScroll);
+            double travel = Math.Max(1, trackHeight - thumb.Height);
+            double newY = Math.Clamp(_dragThumbStartY + (point.Y - _dragAnchorY), trackTop, trackTop + travel);
+            double scroll = Math.Round((newY - trackTop) / travel * _maxScroll);
             if (scroll != _scroll)
             {
                 _scroll = scroll;
@@ -394,97 +359,97 @@ internal sealed class GameGrid : Panel
             return;
         }
 
-        _lastMouse = e.Location;
-        bool over = IsOverScrollbar(e.Location);
+        _lastMouse = point;
+        bool over = IsOverScrollbar(point);
         if (over != _scrollbarHover)
         {
             _scrollbarHover = over;
-            Invalidate();
+            InvalidateVisual();
         }
-        UpdateHover(e.Location);
-        base.OnMouseMove(e);
+        UpdateHover(point);
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnPointerExited(PointerEventArgs e)
     {
+        base.OnPointerExited(e);
         _lastMouse = new Point(-1, -1);
         _hoverCard?.MouseLeave();
         _hoverCard = null;
         if (_scrollbarHover && !_dragging)
         {
             _scrollbarHover = false;
-            Invalidate();
+            InvalidateVisual();
         }
-        Cursor = Cursors.Default;
-        base.OnMouseLeave(e);
+        Cursor = Cursor.Default;
     }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        // A press on the scrollbar also produces a click; it is not meant for a card.
-        if (e.Button == MouseButtons.Left && !_dragging && !IsOverScrollbar(e.Location) &&
-            CardAt(e.Location) is { } card)
-        {
-            card.MouseClick(new Point(e.X - card.Bounds.X, e.Y - card.Bounds.Y));
-        }
-        base.OnMouseClick(e);
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left && IsOverScrollbar(e.Location) && _maxScroll > 0)
+        base.OnPointerPressed(e);
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        var point = e.GetPosition(this);
+        // The second press of a double click is no click (WinForms raised DoubleClick instead): a game starts once.
+        _pressed = e.ClickCount % 2 == 1;
+        if (IsOverScrollbar(point) && _maxScroll > 0)
         {
             var thumb = GetScrollThumb();
-            float scale = Theme.Scale(this);
-            if (thumb.Contains(e.Location))
+            if (thumb.Contains(point))
             {
-                _dragAnchorY = e.Y;
-                _dragThumbStartY = (int)thumb.Top;
+                _dragAnchorY = point.Y;
+                _dragThumbStartY = thumb.Top;
             }
             else
             {
-                float trackTop = 12f * scale;
-                float trackHeight = Math.Max(1f, ClientSize.Height - 24f * scale);
-                float travel = Math.Max(1f, trackHeight - thumb.Height);
-                float progress = Math.Clamp((e.Y - trackTop - thumb.Height / 2f) / travel, 0f, 1f);
-                _scroll = (int)Math.Round(progress * _maxScroll);
+                double trackTop = 12;
+                double trackHeight = Math.Max(1, Bounds.Height - 24);
+                double travel = Math.Max(1, trackHeight - thumb.Height);
+                double progress = Math.Clamp((point.Y - trackTop - thumb.Height / 2) / travel, 0, 1);
+                _scroll = Math.Round(progress * _maxScroll);
                 Relayout();
-                _dragAnchorY = e.Y;
-                _dragThumbStartY = (int)GetScrollThumb().Top;
+                _dragAnchorY = point.Y;
+                _dragThumbStartY = GetScrollThumb().Top;
             }
             _dragging = true;
-            Capture = true;
-            Invalidate();
-            return;
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            InvalidateVisual();
         }
-        base.OnMouseDown(e);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
+        base.OnPointerReleased(e);
+        var point = e.GetPosition(this);
         if (_dragging)
         {
             _dragging = false;
-            Capture = false;
-            Invalidate();
-            UpdateHover(e.Location);
+            _pressed = false;
+            e.Pointer.Capture(null);
+            InvalidateVisual();
+            UpdateHover(point);
             return;
         }
 
-        if (e.Button == MouseButtons.Right && CardAt(e.Location) is { } card)
-            card.ShowContextMenu(new Point(e.X - card.Bounds.X, e.Y - card.Bounds.Y));
-        base.OnMouseUp(e);
+        if (e.InitialPressMouseButton == MouseButton.Left)
+        {
+            // A click is a left press and release inside the grid, for the card under the release.
+            // A release on the scrollbar is not meant for a card.
+            bool click = _pressed;
+            _pressed = false;
+            if (click && new Rect(Bounds.Size).Contains(point) && !IsOverScrollbar(point) && CardAt(point) is { } card)
+                card.MouseClick(new Point(point.X - card.Bounds.X, point.Y - card.Bounds.Y));
+        }
+        else if (e.InitialPressMouseButton == MouseButton.Right && CardAt(point) is { } card)
+        {
+            card.ShowContextMenu(new Point(point.X - card.Bounds.X, point.Y - card.Bounds.Y));
+        }
     }
 
-    protected override void Dispose(bool disposing)
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
     {
-        if (disposing)
-        {
-            _emptyTitleFont.Dispose();
-            _emptyTextFont.Dispose();
-            foreach (var card in _cards.Values) card.Dispose();
-            _cards.Clear();
-        }
-        base.Dispose(disposing);
+        base.OnPointerCaptureLost(e);
+        if (!_dragging) return;
+        _dragging = false;
+        InvalidateVisual();
     }
 }

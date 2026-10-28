@@ -60,9 +60,9 @@ internal sealed record Palette
     public required Color TitleBar { get; init; }
     public required Color TitleBorder { get; init; }
     public bool Light { get; init; }
-    public float BorderWidth { get; init; } = 1f;
-    public float CardRadius { get; init; } = 14f;
-    public float ControlRadius { get; init; }
+    public double BorderWidth { get; init; } = 1;
+    public double CardRadius { get; init; } = 14;
+    public double ControlRadius { get; init; }
 
     public static Palette For(UiStyle style) => style switch
     {
@@ -72,9 +72,9 @@ internal sealed record Palette
         _ => Default
     };
 
-    private static Color C(int r, int g, int b) => Color.FromArgb(r, g, b);
-    private static Color C(int a, int r, int g, int b) => Color.FromArgb(a, r, g, b);
-    private static Color Hex(int rgb) => Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    private static Color C(int r, int g, int b) => Color.FromRgb((byte)r, (byte)g, (byte)b);
+    private static Color C(int a, int r, int g, int b) => Color.FromArgb((byte)a, (byte)r, (byte)g, (byte)b);
+    private static Color Hex(int rgb) => Color.FromRgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
 
     /// <summary>Deep navy with gold.</summary>
     public static readonly Palette Default = new()

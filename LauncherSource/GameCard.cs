@@ -1,7 +1,3 @@
-﻿using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
-using System.Diagnostics;
-
 namespace RpgLauncher;
 
 /// <summary>Card-image actions offered in the right-click menu.</summary>
@@ -17,25 +13,29 @@ internal enum ImageAction
 /// <summary>
 /// One game tile. Not a control: <see cref="GameGrid"/> lays out, paints and routes input to cards so scrolling stays cheap.
 /// </summary>
-internal sealed class GameCard : IDisposable
+internal sealed class GameCard
 {
     // Shared by all cards (there can be hundreds).
-    private static readonly Font TitleFont = Theme.Font(11.4f, FontStyle.Bold);
-    private static readonly Font MetaFont = Theme.Font(8.5f);
-    private static readonly Font RunningFont = Theme.Font(7.2f, FontStyle.Bold);
-    private static readonly Font InitialFont = Theme.Font(46f, FontStyle.Bold);
-    private static readonly Font MenuBoldFont = Theme.Font(9.5f, FontStyle.Bold);
+    private static readonly UiFont TitleFont = Look.Font(11.4, bold: true);
+    private static readonly UiFont MetaFont = Look.Font(8.5);
+    private static readonly UiFont RunningFont = Look.Font(7.2, bold: true);
+    private static readonly UiFont InitialFont = Look.Font(46, bold: true);
+
+    private const double Pad = 12;
+    private const double StarGap = 3;
 
     private Metrics? _metrics;
     private Size _metricsSize;
-    private int _metricsDpi;
 
-    // Artwork pre-rendered at the card's exact size (rounded corners, bottom shade) so painting is a 1:1 copy.
+    // The picture scaled once to the exact screen pixels it covers, so painting is a 1:1 copy, as the WinForms
+    // version did; letting the renderer shrink the thumbnail on every paint softens it.
     private Bitmap? _artwork;
     private Bitmap? _artworkSource;
-    private Size _artworkSize;
-    private string? _artworkInitial;
-    private bool _artworkSquare;
+    private Rect _artworkFrom;
+    private PixelSize _artworkSize;
+    private double _artworkScale;
+
+    private static readonly RenderOptions PixelCopy = new() { BitmapInterpolationMode = BitmapInterpolationMode.None };
 
     private bool _hover;
     private int _hoverStar = -1;
@@ -47,11 +47,11 @@ internal sealed class GameCard : IDisposable
 
     public GameEntry Game { get; set; }
 
-    /// <summary>Position in the owning grid's client coordinates.</summary>
-    public Rectangle Bounds { get; set; }
+    /// <summary>Position in the owning grid's coordinates.</summary>
+    public Rect Bounds { get; set; }
 
-    public int Width => Bounds.Width;
-    public int Height => Bounds.Height;
+    public double Width => Bounds.Width;
+    public double Height => Bounds.Height;
 
     public bool Visible
     {
@@ -60,7 +60,7 @@ internal sealed class GameCard : IDisposable
         {
             if (_visible == value) return;
             _visible = value;
-            // Off-screen cards free their scaled artwork; it is rebuilt on the next paint.
+            // Off-screen cards free their scaled picture; it is made again on the next paint.
             if (!value)
             {
                 ReleaseArtwork();
@@ -95,87 +95,76 @@ internal sealed class GameCard : IDisposable
         Game = game;
     }
 
-    private float Scale => Theme.Scale(_owner);
-
     public void Invalidate()
     {
-        if (_visible) _owner.Invalidate(Bounds);
+        if (_visible) _owner.InvalidateVisual();
     }
 
     /// <summary>Square cards show the whole picture; otherwise a 16:9 crop.</summary>
     public static bool SquareCards { get; set; }
 
-    private static float ImageAspect => SquareCards ? 1f : 9f / 16f;
+    private static double ImageAspect => SquareCards ? 1 : 9.0 / 16.0;
 
-    public static int MeasureHeight(int width, float scale)
+    public static double MeasureHeight(double width)
     {
-        int pad = (int)Math.Round(12f * scale);
-        int imgHeight = (int)Math.Round((width - pad * 2) * ImageAspect);
-        return pad + imgHeight + (int)Math.Round(82f * scale);
+        double imgHeight = Math.Round((width - Pad * 2) * ImageAspect);
+        return Pad + imgHeight + 82;
     }
 
     private sealed record Metrics(
-        RectangleF Image, RectangleF Heart, RectangleF Title, RectangleF Meta,
-        RectangleF Row, RectangleF Stars, RectangleF Playtime, RectangleF Badge, RectangleF Running);
+        Rect Image, Rect Heart, Rect Title, Rect Meta,
+        Rect Row, Rect Stars, Rect Playtime, Rect Badge, Rect Running);
 
     private Metrics GetMetrics()
     {
-        if (_metrics is not null && _metricsSize == Bounds.Size && _metricsDpi == _owner.DeviceDpi) return _metrics;
+        if (_metrics is not null && _metricsSize == Bounds.Size) return _metrics;
         _metrics = ComputeMetrics();
         _metricsSize = Bounds.Size;
-        _metricsDpi = _owner.DeviceDpi;
         return _metrics;
     }
 
     private Metrics ComputeMetrics()
     {
-        float scale = Scale;
-        int pad = (int)Math.Round(12f * scale);
-        int imgHeight = (int)Math.Round((Width - pad * 2) * ImageAspect);
-        var image = new RectangleF(pad, pad, Math.Max(1, Width - pad * 2), Math.Max(1, imgHeight));
+        double imgHeight = Math.Round((Width - Pad * 2) * ImageAspect);
+        var image = new Rect(Pad, Pad, Math.Max(1, Width - Pad * 2), Math.Max(1, imgHeight));
 
-        int heartSize = (int)Math.Round(28f * scale);
-        var heart = new RectangleF((float)(image.Right - Math.Round(9f * scale) - heartSize),
-            (float)(image.Top + Math.Round(9f * scale)), heartSize, heartSize);
+        const double heartSize = 28;
+        var heart = new Rect(image.Right - 9 - heartSize, image.Top + 9, heartSize, heartSize);
 
-        float titleTop = image.Bottom + (float)Math.Round(10f * scale);
-        var title = new RectangleF(pad, titleTop, image.Width, (float)Math.Round(22f * scale));
-        var meta = new RectangleF(pad, titleTop + (float)Math.Round(23f * scale), image.Width, (float)Math.Round(14f * scale));
-        float rowTop = titleTop + (float)Math.Round(41f * scale);
-        var row = new RectangleF(pad, rowTop, image.Width, (float)Math.Round(19f * scale));
+        double titleTop = image.Bottom + 10;
+        var title = new Rect(Pad, titleTop, image.Width, 22);
+        var meta = new Rect(Pad, titleTop + 23, image.Width, 14);
+        double rowTop = titleTop + 41;
+        var row = new Rect(Pad, rowTop, image.Width, 19);
 
-        float starSize = Math.Max(12f, 17f * scale);
-        float starGap = Math.Max(2f, 3f * scale);
-        var stars = new RectangleF(pad, rowTop + Math.Max(0f, (row.Height - starSize) / 2f),
-            starSize * 5f + starGap * 4f, starSize);
+        const double starSize = 17;
+        var stars = new Rect(Pad, rowTop + Math.Max(0, (row.Height - starSize) / 2),
+            starSize * 5 + StarGap * 4, starSize);
 
-        var playtime = new RectangleF(pad + stars.Width + (float)Math.Round(6f * scale), rowTop,
-            Math.Max(20f, image.Width - stars.Width - (float)Math.Round(6f * scale)), row.Height);
+        var playtime = new Rect(Pad + stars.Width + 6, rowTop,
+            Math.Max(20, image.Width - stars.Width - 6), row.Height);
 
-        float badgeHeight = (float)Math.Round(18f * scale);
-        var badge = new RectangleF((float)(image.Left + Math.Round(9f * scale)), (float)(image.Top + Math.Round(9f * scale)),
-            (float)Math.Round(38f * scale), badgeHeight);
-        var running = new RectangleF(badge.Left, badge.Bottom + (float)Math.Round(5f * scale),
-            (float)Math.Round(70f * scale), badgeHeight);
+        const double badgeHeight = 18;
+        var badge = new Rect(image.Left + 9, image.Top + 9, 38, badgeHeight);
+        var running = new Rect(badge.Left, badge.Bottom + 5, 70, badgeHeight);
 
         return new Metrics(image, heart, title, meta, row, stars, playtime, badge, running);
     }
 
-    private RectangleF GetStarRect(Metrics m, int index)
+    private static Rect GetStarRect(Metrics m, int index)
     {
-        float starSize = m.Stars.Height;
-        float gap = Math.Max(2f, 3f * Scale);
-        return new RectangleF(m.Stars.Left + index * (starSize + gap), m.Stars.Top, starSize, starSize);
+        double starSize = m.Stars.Height;
+        return new Rect(m.Stars.Left + index * (starSize + StarGap), m.Stars.Top, starSize, starSize);
     }
 
     private int HitStar(Point point)
     {
         var m = GetMetrics();
-        if (point.Y < m.Stars.Top - 3f || point.Y > m.Stars.Bottom + 3f) return -1;
+        if (point.Y < m.Stars.Top - 3 || point.Y > m.Stars.Bottom + 3) return -1;
         for (int i = 0; i < 5; i++)
         {
             var r = GetStarRect(m, i);
-            var hit = new RectangleF(r.X - 2f, r.Y - 3f, r.Width + 4f, r.Height + 6f);
+            var hit = new Rect(r.X - 2, r.Y - 3, r.Width + 4, r.Height + 6);
             if (hit.Contains(point)) return i;
         }
         return -1;
@@ -248,7 +237,7 @@ internal sealed class GameCard : IDisposable
         var menu = Menus.Create();
 
         var play = Menus.Item("Play", (_, _) => PlayRequested?.Invoke(Game));
-        play.Font = MenuBoldFont;
+        play.Bold = true;
         menu.Items.Add(play);
         if (Game.Family == EngineFamily.MvMz)
             menu.Items.Add(Menus.Item(Game.CheatsOn ? "Show Cheats" : "Play with Cheats", (_, _) => CheatsRequested?.Invoke(Game)));
@@ -259,7 +248,7 @@ internal sealed class GameCard : IDisposable
 
         if (!string.IsNullOrWhiteSpace(Game.ExecutablePath))
         {
-            menu.Items.Add(Menus.Item("Show executable", (_, _) => ShowInExplorer(Game.ExecutablePath!)));
+            menu.Items.Add(Menus.Item("Show executable", (_, _) => ShowInFileManager(Game.ExecutablePath!)));
         }
 
         menu.Items.Add(Menus.Separator());
@@ -276,7 +265,7 @@ internal sealed class GameCard : IDisposable
         for (int i = 1; i <= 5; i++)
         {
             int value = i;
-            var item = Menus.Item(new string('\u2605', i) + new string('\u2606', 5 - i),
+            var item = Menus.Item(new string('★', i) + new string('☆', 5 - i),
                 (_, _) => RatingChanged?.Invoke(Game, value));
             item.Checked = Game.Rating == value;
             rating.DropDownItems.Add(item);
@@ -293,15 +282,15 @@ internal sealed class GameCard : IDisposable
             groups.DropDownItems.Add(item);
         }
         if (GroupNames.Count > 0) groups.DropDownItems.Add(Menus.Separator());
-        groups.DropDownItems.Add(Menus.Item("New Group\u2026", (_, _) => GroupToggled?.Invoke(Game, null)));
+        groups.DropDownItems.Add(Menus.Item("New Group…", (_, _) => GroupToggled?.Invoke(Game, null)));
         Menus.StyleSubmenu(groups, menu, checks: true);
         menu.Items.Add(groups);
 
         menu.Items.Add(Menus.Separator());
-        menu.Items.Add(Menus.Item("Rename\u2026", (_, _) => RenameRequested?.Invoke(Game)));
-        menu.Items.Add(Menus.Item("Change image\u2026",
+        menu.Items.Add(Menus.Item("Rename…", (_, _) => RenameRequested?.Invoke(Game)));
+        menu.Items.Add(Menus.Item("Change image…",
             (_, _) => ImageActionRequested?.Invoke(Game, ImageAction.Change)));
-        var framing = Menus.Item("Adjust image framing\u2026",
+        var framing = Menus.Item("Adjust image framing…",
             (_, _) => ImageActionRequested?.Invoke(Game, ImageAction.AdjustFraming));
         framing.Enabled = Game.HasFramableImage;
         menu.Items.Add(framing);
@@ -327,21 +316,21 @@ internal sealed class GameCard : IDisposable
         menu.Items.Add(Menus.Separator());
         if (Game.Metadata is { } metadata)
         {
-            var info = Menus.Item("Game info\u2026", (_, _) => InfoRequested?.Invoke(Game));
-            info.Font = MenuBoldFont;
+            var info = Menus.Item("Game info…", (_, _) => InfoRequested?.Invoke(Game));
+            info.Bold = true;
             menu.Items.Add(info);
-            menu.Items.Add(Menus.Item("Add Tags\u2026", (_, _) => TagsRequested?.Invoke(Game)));
+            menu.Items.Add(Menus.Item("Add Tags…", (_, _) => TagsRequested?.Invoke(Game)));
             menu.Items.Add(Menus.Item("Open DLsite page", (_, _) => OpenUrl(metadata.UrlFor(Game.MetadataLanguage))));
             menu.Items.Add(Menus.Item("Search Nepchan", (_, _) => SearchNepchan()));
             menu.Items.Add(Menus.Item("Refresh metadata", (_, _) => MetadataRequested?.Invoke(Game)));
         }
         else
         {
-            menu.Items.Add(Menus.Item("Add Tags\u2026", (_, _) => TagsRequested?.Invoke(Game)));
+            menu.Items.Add(Menus.Item("Add Tags…", (_, _) => TagsRequested?.Invoke(Game)));
             menu.Items.Add(Menus.Item("Look up metadata", (_, _) => MetadataRequested?.Invoke(Game)));
             menu.Items.Add(Menus.Item("Search Nepchan", (_, _) => SearchNepchan()));
         }
-        menu.Items.Add(Menus.Item("Set DLsite page\u2026", (_, _) => StorePageRequested?.Invoke(Game)));
+        menu.Items.Add(Menus.Item("Set DLsite page…", (_, _) => StorePageRequested?.Invoke(Game)));
 
         Menus.Show(menu, _owner, new Point(Bounds.X + location.X, Bounds.Y + location.Y));
     }
@@ -361,7 +350,7 @@ internal sealed class GameCard : IDisposable
         if (!WebLinks.IsTrusted(url)) return;
         try
         {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Shell.OpenUrl(url);
         }
         catch
         {
@@ -369,11 +358,11 @@ internal sealed class GameCard : IDisposable
         }
     }
 
-    private static void ShowInExplorer(string path)
+    private static void ShowInFileManager(string path)
     {
         try
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+            Shell.ShowInFileManager(path);
         }
         catch
         {
@@ -382,232 +371,194 @@ internal sealed class GameCard : IDisposable
     }
 
     /// <summary>Paints the card; the caller translates <paramref name="g"/> to the card's origin.</summary>
-    public void Paint(Graphics g)
+    public void Paint(DrawingContext g)
     {
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-        float scale = Scale;
         var m = GetMetrics();
 
-        float inset = Theme.BorderWidth / 2f;
-        var cardRect = new RectangleF(inset, inset, Width - Theme.BorderWidth, Height - Theme.BorderWidth);
-        using (var cardPath = Theme.Rounded(cardRect, Theme.CardRadius * scale))
-        using (var cardBrush = new SolidBrush(_hover ? Theme.CardHover : Theme.Card))
-        {
-            g.FillPath(cardBrush, cardPath);
-            using var border = new Pen(_hover ? Theme.CardBorderHover : Theme.CardBorder, Theme.BorderWidth);
-            g.DrawPath(border, cardPath);
-        }
+        double inset = Look.BorderWidth / 2;
+        var cardRect = new Rect(inset, inset, Width - Look.BorderWidth, Height - Look.BorderWidth);
+        g.DrawRectangle(Look.Brush(_hover ? Look.CardHover : Look.Card),
+            Look.Pen(_hover ? Look.CardBorderHover : Look.CardBorder, Look.BorderWidth),
+            Look.Rounded(cardRect, Look.CardRadius));
 
-        var imageRect = Rectangle.Round(m.Image);
-        var artwork = GetArtwork(imageRect.Size, scale);
-        var previousInterpolation = g.InterpolationMode;
-        var previousOffset = g.PixelOffsetMode;
-        g.InterpolationMode = InterpolationMode.NearestNeighbor;
-        g.PixelOffsetMode = PixelOffsetMode.Half;
-        g.DrawImage(artwork, imageRect);
-        g.InterpolationMode = previousInterpolation;
-        g.PixelOffsetMode = previousOffset;
+        DrawArtwork(g, m.Image);
 
-        if (_hover) DrawHoverOverlay(g, m.Image, scale);
+        if (_hover) DrawHoverOverlay(g, m.Image);
 
-        if (_hover) DrawHeart(g, m.Heart, scale);
+        if (_hover) DrawHeart(g, m.Heart);
 
-        Theme.DrawText(g, Game.CardTitle, TitleFont, Theme.Text, m.Title);
+        Look.DrawText(g, Game.CardTitle, TitleFont, Look.Text, m.Title);
         if (Game.Metadata is not null)
-            Theme.DrawText(g, Game.MetadataLine, MetaFont, Theme.TextDim, m.Meta);
+            Look.DrawText(g, Game.MetadataLine, MetaFont, Look.TextDim, m.Meta);
 
-        DrawStars(g, m.Stars, scale);
+        DrawStars(g, m.Stars);
         DrawPlaytime(g, m.Playtime);
 
-        if (Game.IsRunning) DrawRunning(g, m.Running, scale);
+        if (Game.IsRunning) DrawRunning(g, m.Running);
     }
 
-    private Bitmap GetArtwork(Size size, float scale)
+    /// <summary>The picture with rounded corners and a dark shade along its bottom; a placeholder while there is none.</summary>
+    private void DrawArtwork(DrawingContext g, Rect rect)
     {
-        size = new Size(Math.Max(1, size.Width), Math.Max(1, size.Height));
         bool square = SquareCards;
         // Square cards show the regular thumbnail whole until the full picture loads, or when there is none.
         var thumbnail = square ? Game.FullThumbnail ?? Game.Thumbnail : Game.Thumbnail;
-        string? initial = thumbnail is null
-            ? (string.IsNullOrWhiteSpace(Game.CardTitle) ? "?" : Game.CardTitle[..1].ToUpperInvariant())
-            : null;
 
-        if (_artwork is not null && ReferenceEquals(_artworkSource, thumbnail) &&
-            _artworkSize == size && _artworkInitial == initial && _artworkSquare == square)
-            return _artwork;
-
-        ReleaseArtwork();
-
-        var bitmap = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
-        using (var g = Graphics.FromImage(bitmap))
+        using (g.PushClip(Look.Rounded(rect, Look.ImageRadius)))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-
-            var rect = new RectangleF(0, 0, size.Width, size.Height);
-            using var imagePath = Theme.Rounded(rect, Theme.ImageRadius * scale);
-            g.SetClip(imagePath);
-
             if (thumbnail is not null)
             {
+                var size = thumbnail.Size;
                 if (square)
                 {
-                    using (var backdrop = new LinearGradientBrush(rect, Theme.PlaceholderTop, Theme.PlaceholderBottom, 90f))
-                        g.FillRectangle(backdrop, rect);
-                    Theme.DrawContain(g, thumbnail, rect);
+                    g.FillRectangle(Look.Gradient(Look.PlaceholderTop, Look.PlaceholderBottom), rect);
+                    double fit = Math.Min(rect.Width / size.Width, rect.Height / size.Height);
+                    double w = size.Width * fit, h = size.Height * fit;
+                    DrawPicture(g, thumbnail, new Rect(size),
+                        new Rect(rect.X + (rect.Width - w) / 2, rect.Y + (rect.Height - h) / 2, w, h));
                 }
                 else
                 {
-                    Theme.DrawCover(g, thumbnail, rect);
+                    double cover = Math.Max(rect.Width / size.Width, rect.Height / size.Height);
+                    double w = rect.Width / cover, h = rect.Height / cover;
+                    DrawPicture(g, thumbnail, new Rect((size.Width - w) / 2, (size.Height - h) / 2, w, h), rect);
                 }
             }
             else
             {
-                using (var gradient = new LinearGradientBrush(rect,
-                           Theme.PlaceholderTop, Theme.PlaceholderBottom, 45f))
-                {
-                    g.FillRectangle(gradient, rect);
-                }
-                Theme.DrawText(g, initial!, InitialFont, Color.FromArgb(150, Theme.Gold), rect);
+                string initial = string.IsNullOrWhiteSpace(Game.CardTitle) ? "?" : Game.CardTitle[..1].ToUpperInvariant();
+                g.FillRectangle(Look.Gradient(Look.PlaceholderTop, Look.PlaceholderBottom, 45), rect);
+                Look.DrawText(g, initial, InitialFont, Look.Alpha(150, Look.Gold), rect);
             }
 
-            float overlayHeight = Math.Min(rect.Height * 0.55f, 70f * scale);
-            var overlayRect = new RectangleF(rect.Left, rect.Bottom - overlayHeight, rect.Width, overlayHeight);
-            using var shade = new LinearGradientBrush(overlayRect,
-                Color.FromArgb(0, 8, 8, 12), Color.FromArgb(135, 8, 8, 12), LinearGradientMode.Vertical);
-            g.FillRectangle(shade, overlayRect);
+            double overlayHeight = Math.Min(rect.Height * 0.55, 70);
+            var overlayRect = new Rect(rect.Left, rect.Bottom - overlayHeight, rect.Width, overlayHeight);
+            g.FillRectangle(Look.Gradient(Color.FromArgb(0, 8, 8, 12), Color.FromArgb(135, 8, 8, 12)), overlayRect);
         }
-
-        _artwork = bitmap;
-        _artworkSource = thumbnail;
-        _artworkSize = size;
-        _artworkInitial = initial;
-        _artworkSquare = square;
-        return bitmap;
     }
 
-    /// <summary>Drops the cached artwork so the next paint redraws it (e.g. after a style change).</summary>
-    public void ResetArtwork() => ReleaseArtwork();
+    /// <summary>Draws part of a picture into <paramref name="dest"/>, scaled once to the screen pixels it covers.</summary>
+    private void DrawPicture(DrawingContext g, Bitmap picture, Rect from, Rect dest)
+    {
+        double scale = TopLevel.GetTopLevel(_owner)?.RenderScaling ?? 1;
+        // The grid starts on a screen pixel; start the picture on one too (in grid coordinates), so the copy is 1:1.
+        var size = new PixelSize(Math.Max(1, (int)Math.Round(dest.Width * scale)), Math.Max(1, (int)Math.Round(dest.Height * scale)));
+        double left = Math.Round((Bounds.X + dest.X) * scale) / scale - Bounds.X;
+        double top = Math.Round((Bounds.Y + dest.Y) * scale) / scale - Bounds.Y;
+
+        if (_artwork is null || !ReferenceEquals(_artworkSource, picture) || _artworkFrom != from ||
+            _artworkSize != size || _artworkScale != scale)
+        {
+            ReleaseArtwork();
+            _artwork = ImageKit.Resample(picture, from, size, scale);
+            _artworkSource = picture;
+            _artworkFrom = from;
+            _artworkSize = size;
+            _artworkScale = scale;
+        }
+        using (g.PushRenderOptions(PixelCopy))
+            g.DrawImage(_artwork, new Rect(_artwork.Size), new Rect(left, top, size.Width / scale, size.Height / scale));
+    }
+
+    /// <summary>Drops the scaled picture so the next paint makes it again (e.g. after a style change).</summary>
+    public void ResetArtwork()
+    {
+        ReleaseArtwork();
+        Invalidate();
+    }
 
     private void ReleaseArtwork()
     {
-        _artwork?.Dispose();
+        // The thumbnail itself belongs to the game; only a scaled copy made here is freed.
+        if (_artwork is not null && !ReferenceEquals(_artwork, _artworkSource)) _artwork.Dispose();
         _artwork = null;
         _artworkSource = null;
     }
 
-    private void DrawHoverOverlay(Graphics g, RectangleF rect, float scale)
+    private static void DrawHoverOverlay(DrawingContext g, Rect rect)
     {
-        using (var veilPath = Theme.Rounded(rect, Theme.ImageRadius * scale))
-        using (var veil = new SolidBrush(Color.FromArgb(72, 8, 8, 12)))
-            g.FillPath(veil, veilPath);
+        g.DrawRectangle(Look.Brush(Color.FromArgb(72, 8, 8, 12)), null, Look.Rounded(rect, Look.ImageRadius));
 
-        float radius = 26f * scale;
-        var circle = new RectangleF(rect.Left + rect.Width / 2f - radius,
-            rect.Top + rect.Height / 2f - radius, radius * 2f, radius * 2f);
-        using (var brush = new SolidBrush(Color.FromArgb(238, Theme.Gold)))
-            g.FillEllipse(brush, circle);
-        using (var brush = new SolidBrush(Color.FromArgb(24, 20, 12)))
-        {
-            float t = 10.5f * scale;
-            var points = new[]
-            {
-                new PointF(circle.Left + circle.Width / 2f - t * 0.55f, circle.Top + circle.Height / 2f - t),
-                new PointF(circle.Left + circle.Width / 2f - t * 0.55f, circle.Top + circle.Height / 2f + t),
-                new PointF(circle.Left + circle.Width / 2f + t * 0.85f, circle.Top + circle.Height / 2f)
-            };
-            g.FillPolygon(brush, points);
-        }
+        const double radius = 26;
+        var circle = new Rect(rect.Left + rect.Width / 2 - radius,
+            rect.Top + rect.Height / 2 - radius, radius * 2, radius * 2);
+        g.DrawEllipse(Look.Brush(Look.Alpha(238, Look.Gold)), null, circle);
+
+        const double t = 10.5;
+        double cx = circle.Left + circle.Width / 2, cy = circle.Top + circle.Height / 2;
+        g.DrawGeometry(Look.Brush(Color.FromRgb(24, 20, 12)), null, Look.Lines(true,
+            new Point(cx - t * 0.55, cy - t),
+            new Point(cx - t * 0.55, cy + t),
+            new Point(cx + t * 0.85, cy)));
     }
 
-    private void DrawRunning(Graphics g, RectangleF badge, float scale)
+    private static void DrawRunning(DrawingContext g, Rect badge)
     {
-        var text = "RUNNING";
-        var size = g.MeasureString(text, RunningFont);
-        var rect = new RectangleF(badge.Left, badge.Top, size.Width + 26f * scale, badge.Height);
-        using (var path = Theme.Rounded(rect, rect.Height / 2f))
-        using (var brush = new SolidBrush(Color.FromArgb(190, 9, 13, 11)))
-        {
-            g.FillPath(brush, path);
-            using var border = new Pen(Color.FromArgb(90, Theme.Success), 1f);
-            g.DrawPath(border, path);
-        }
+        const string text = "RUNNING";
+        var size = Look.Measure(text, RunningFont);
+        var rect = new Rect(badge.Left, badge.Top, size.Width + 26, badge.Height);
+        g.DrawRectangle(Look.Brush(Color.FromArgb(190, 9, 13, 11)), Look.Pen(Look.Alpha(90, Look.Success), 1),
+            Look.Rounded(rect, rect.Height / 2));
 
-        float dot = 5f * scale;
-        using (var brush = new SolidBrush(Theme.Success))
-            g.FillEllipse(brush, rect.Left + 8f * scale, rect.Top + (rect.Height - dot) / 2f, dot, dot);
-        Theme.DrawText(g, text, RunningFont, Theme.Success,
-            new RectangleF(rect.Left + 17f * scale, rect.Top, rect.Width - 22f * scale, rect.Height));
+        const double dot = 5;
+        g.DrawEllipse(Look.Brush(Look.Success), null, new Rect(rect.Left + 8, rect.Top + (rect.Height - dot) / 2, dot, dot));
+        Look.DrawText(g, text, RunningFont, Look.Success,
+            new Rect(rect.Left + 17, rect.Top, rect.Width - 22, rect.Height));
     }
 
-    private void DrawHeart(Graphics g, RectangleF circleRect, float scale)
+    private void DrawHeart(DrawingContext g, Rect circleRect)
     {
         bool favorite = Game.Favorite;
         if (favorite || _hoverHeart)
-        {
-            using var brush = new SolidBrush(Color.FromArgb(favorite ? 210 : 150, 8, 8, 12));
-            g.FillEllipse(brush, circleRect);
-        }
+            g.DrawEllipse(Look.Brush(Color.FromArgb((byte)(favorite ? 210 : 150), 8, 8, 12)), null, circleRect);
 
-        float size = 13f * scale;
-        var heartRect = new RectangleF(circleRect.Left + (circleRect.Width - size) / 2f,
-            circleRect.Top + (circleRect.Height - size) / 2f, size, size);
-        using var heart = Theme.Heart(heartRect);
+        const double size = 13;
+        var heartRect = new Rect(circleRect.Left + (circleRect.Width - size) / 2,
+            circleRect.Top + (circleRect.Height - size) / 2, size, size);
+        var heart = Look.Heart(heartRect);
         if (favorite)
         {
-            using var brush = new SolidBrush(Theme.Gold);
-            g.FillPath(brush, heart);
+            g.DrawGeometry(Look.Brush(Look.Gold), null, heart);
         }
         else
         {
-            using var pen = new Pen(Color.FromArgb(_hoverHeart ? 250 : 205, 255, 255, 255),
-                _hoverHeart ? 2f : 1.5f) { LineJoin = LineJoin.Round };
-            g.DrawPath(pen, heart);
+            g.DrawGeometry(null, Look.Pen(Color.FromArgb((byte)(_hoverHeart ? 250 : 205), 255, 255, 255),
+                _hoverHeart ? 2 : 1.5, round: true), heart);
         }
     }
 
-    private void DrawStars(Graphics g, RectangleF starsRect, float scale)
+    private void DrawStars(DrawingContext g, Rect starsRect)
     {
-        float size = starsRect.Height;
+        double size = starsRect.Height;
         for (int i = 0; i < 5; i++)
         {
-            var r = new RectangleF(starsRect.Left + i * (size + Math.Max(2f, 3f * scale)), starsRect.Top, size, size);
-            using var path = Theme.Star(r);
+            var r = new Rect(starsRect.Left + i * (size + StarGap), starsRect.Top, size, size);
             bool filled = i < Game.Rating;
             bool hover = _hoverStar >= i;
             Color color = filled
-                ? (hover ? Theme.StarFillBright : Theme.StarFill)
-                : (hover ? Color.FromArgb(120, Theme.StarFill) : Theme.StarEmpty);
-            using var brush = new SolidBrush(color);
-            g.FillPath(brush, path);
+                ? (hover ? Look.StarFillBright : Look.StarFill)
+                : (hover ? Look.Alpha(120, Look.StarFill) : Look.StarEmpty);
+            g.DrawGeometry(Look.Brush(color), null, Look.Star(r));
         }
     }
 
-    private void DrawPlaytime(Graphics g, RectangleF rect)
+    private void DrawPlaytime(DrawingContext g, Rect rect)
     {
         string text;
         if (Game.PlaySeconds > 0)
         {
-            text = Theme.FormatDuration(Game.PlaySeconds);
+            text = Look.FormatDuration(Game.PlaySeconds);
         }
         else if (Game.LastPlayedUtc is not null)
         {
-            text = "played " + Theme.LastPlayedText(Game.LastPlayedUtc);
+            text = "played " + Look.LastPlayedText(Game.LastPlayedUtc);
         }
         else
         {
             return; // an empty corner reads better than "not played" on every card
         }
 
-        Theme.DrawText(g, text, MetaFont, Game.PlaySeconds > 0 ? Theme.TextMuted : Theme.TextDim, rect,
-            StringAlignment.Far);
+        Look.DrawText(g, text, MetaFont, Game.PlaySeconds > 0 ? Look.TextMuted : Look.TextDim, rect,
+            TextAlignment.Right);
     }
-
-    public void Dispose() => ReleaseArtwork();
 }

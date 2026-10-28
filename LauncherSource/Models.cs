@@ -221,23 +221,23 @@ internal sealed class ImageFraming
     public string Signature() => FormattableString.Invariant($"{CenterX:F4},{CenterY:F4},{Zoom:F4}");
 
     /// <summary>The source rectangle (in picture pixels) that this framing shows.</summary>
-    public static RectangleF CropRect(SizeF image, ImageFraming? framing)
+    public static Rect CropRect(Size image, ImageFraming? framing)
     {
-        const float aspect = 16f / 9f;
-        float baseW = image.Width, baseH = image.Width / aspect;
+        const double aspect = 16.0 / 9.0;
+        double baseW = image.Width, baseH = image.Width / aspect;
         if (baseH > image.Height)
         {
             baseH = image.Height;
             baseW = image.Height * aspect;
         }
 
-        float zoom = (float)Math.Clamp(framing?.Zoom ?? 1.0, 1.0, MaxZoom);
-        float w = baseW / zoom, h = baseH / zoom;
-        float cx = (float)(framing?.CenterX ?? 0.5) * image.Width;
-        float cy = (float)(framing?.CenterY ?? 0.5) * image.Height;
-        float x = Math.Clamp(cx - w / 2f, 0f, Math.Max(0f, image.Width - w));
-        float y = Math.Clamp(cy - h / 2f, 0f, Math.Max(0f, image.Height - h));
-        return new RectangleF(x, y, w, h);
+        double zoom = Math.Clamp(framing?.Zoom ?? 1.0, 1.0, MaxZoom);
+        double w = baseW / zoom, h = baseH / zoom;
+        double cx = (framing?.CenterX ?? 0.5) * image.Width;
+        double cy = (framing?.CenterY ?? 0.5) * image.Height;
+        double x = Math.Clamp(cx - w / 2, 0, Math.Max(0, image.Width - w));
+        double y = Math.Clamp(cy - h / 2, 0, Math.Max(0, image.Height - h));
+        return new Rect(x, y, w, h);
     }
 }
 
@@ -333,6 +333,9 @@ internal sealed class LauncherData
 
     /// <summary>Optional proxy that every DLsite request goes through.</summary>
     public ProxySettings? DlsiteProxy { get; set; }
+
+    /// <summary>Command that runs games on Linux (⋯ → Wine command…); null uses "wine".</summary>
+    public string? WineCommand { get; set; }
     public MetadataLanguage MetadataLanguage { get; set; } = MetadataLanguage.English;
     public WindowState Window { get; set; } = new();
     public List<string> GameDirectories { get; set; } = new();

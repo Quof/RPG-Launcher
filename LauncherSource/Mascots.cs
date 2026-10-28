@@ -28,7 +28,7 @@ internal static class Mascots
     private static readonly int FamilyOffset = Random.Shared.Next(Family.Length);
 
     /// <summary>True when the current style shows blobs.</summary>
-    public static bool Enabled => Theme.Style == UiStyle.Blob;
+    public static bool Enabled => Look.Style == UiStyle.Blob;
 
     /// <summary>The blob peeking over the header this session.</summary>
     public static Bitmap? Header => Load(Originals[HeaderPick]);
@@ -58,11 +58,7 @@ internal static class Mascots
         try
         {
             using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream($"RpgLauncher.Assets.{name}.png");
-            if (stream is not null)
-            {
-                using var image = Image.FromStream(stream);
-                bitmap = new Bitmap(image);
-            }
+            if (stream is not null) bitmap = new Bitmap(stream);
         }
         catch (Exception ex)
         {
@@ -73,26 +69,31 @@ internal static class Mascots
     }
 
     /// <summary>Width of a mascot drawn at <paramref name="height"/>.</summary>
-    public static float WidthAt(Bitmap image, float height) => image.Width * height / image.Height;
+    public static double WidthAt(Bitmap image, double height) => image.Size.Width * height / image.Size.Height;
+
+    // Each blob at each size it has been drawn at, scaled sharply once.
+    private static readonly Dictionary<(Bitmap, double), SharpPicture> Scaled = new();
 
     /// <summary>Draws a mascot fitted to <paramref name="height"/>, its bottom edge on <paramref name="bottom"/>.</summary>
-    public static RectangleF Draw(Graphics g, Bitmap image, float x, float bottom, float height)
+    public static Rect Draw(DrawingContext g, Bitmap image, double x, double bottom, double height)
     {
-        var rect = new RectangleF(x, bottom - height, WidthAt(image, height), height);
-        var mode = g.InterpolationMode;
-        var offset = g.PixelOffsetMode;
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-        g.DrawImage(image, rect);
-        g.InterpolationMode = mode;
-        g.PixelOffsetMode = offset;
+        var rect = new Rect(x, bottom - height, WidthAt(image, height), height);
+        if (!Scaled.TryGetValue((image, height), out var picture))
+        {
+            if (Scaled.Count > 32) Scaled.Clear();
+            Scaled[(image, height)] = picture = new SharpPicture();
+        }
+        picture.Draw(g, Probe, image, rect);
         return rect;
     }
 
+    // A control with no window: the sharp copy then uses the scale of the launcher's window (Look.PixelScale).
+    private static readonly Control Probe = new();
+
     /// <summary>Draws the spot's blob centered on <paramref name="centerX"/>, peeking up from <paramref name="bottom"/>.</summary>
-    public static void DrawCentered(Graphics g, MascotSpot spot, float centerX, float bottom, float height)
+    public static void DrawCentered(DrawingContext g, MascotSpot spot, double centerX, double bottom, double height)
     {
         if (For(spot) is not { } image) return;
-        Draw(g, image, centerX - WidthAt(image, height) / 2f, bottom, height);
+        Draw(g, image, centerX - WidthAt(image, height) / 2, bottom, height);
     }
 }

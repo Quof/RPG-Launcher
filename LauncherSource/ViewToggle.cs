@@ -1,26 +1,23 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
 /// <summary>Segmented switch in the header, between the library and new releases.</summary>
-internal sealed class ViewToggle : Control
+internal sealed class ViewToggle : Control, ICustomHitTest
 {
-    private static readonly Font SegmentFont = Theme.Font(9f, FontStyle.Bold);
+    private static readonly UiFont SegmentFont = Look.Font(9, bold: true);
     private readonly string[] _labels;
     private int _selected;
     private int _hover = -1;
+    private bool _pressed;
 
     public event Action<int>? SelectedChanged;
 
     public ViewToggle(params string[] labels)
     {
         _labels = labels;
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
-                 ControlStyles.SupportsTransparentBackColor, true);
-        SetStyle(ControlStyles.Selectable, false);
-        BackColor = Color.Transparent;
-        Cursor = Cursors.Hand;
+        Cursor = new Cursor(StandardCursorType.Hand);
+        Focusable = false;
     }
 
     public int Selected
@@ -31,60 +28,51 @@ internal sealed class ViewToggle : Control
             value = Math.Clamp(value, 0, _labels.Length - 1);
             if (value == _selected) return;
             _selected = value;
-            Invalidate();
+            InvalidateVisual();
             SelectedChanged?.Invoke(value);
         }
     }
 
     /// <summary>Width that fits every label.</summary>
-    public int PreferredWidth(float scale)
+    public double PreferredWidth()
     {
-        int width = 0;
-        foreach (var label in _labels)
-        {
-            width += TextRenderer.MeasureText(label, SegmentFont, new Size(int.MaxValue, int.MaxValue),
-                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + (int)Math.Round(26f * scale);
-        }
-        return width + (int)Math.Round(6f * scale);
+        double width = 0;
+        foreach (var label in _labels) width += LabelWidth(label) + 26;
+        return width + 6;
     }
 
-    private Rectangle SegmentRect(int index)
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    private static double LabelWidth(string label) => Math.Ceiling(Look.Measure(label, SegmentFont).Width);
+
+    private Rect SegmentRect(int index)
     {
-        float scale = Theme.Scale(this);
-        int inset = (int)Math.Round(3f * scale);
-        int x = inset;
+        const double inset = 3;
+        double x = inset;
         for (int i = 0; i < _labels.Length; i++)
         {
-            int w = TextRenderer.MeasureText(_labels[i], SegmentFont, new Size(int.MaxValue, int.MaxValue),
-                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + (int)Math.Round(26f * scale);
-            if (i == _labels.Length - 1) w = Width - inset - x;
-            if (i == index) return new Rectangle(x, inset, w, Height - inset * 2);
+            double w = LabelWidth(_labels[i]) + 26;
+            if (i == _labels.Length - 1) w = Bounds.Width - inset - x;
+            if (i == index) return new Rect(x, inset, w, Bounds.Height - inset * 2);
             x += w;
         }
-        return Rectangle.Empty;
+        return default;
     }
 
-    private int HitTest(Point point)
+    private int SegmentAt(Point point)
     {
         for (int i = 0; i < _labels.Length; i++)
+        {
             if (SegmentRect(i).Contains(point)) return i;
+        }
         return -1;
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    public override void Render(DrawingContext g)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        float scale = Theme.Scale(this);
-
-        var outer = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-        using (var path = Theme.Rounded(outer, Radius(outer.Height)))
-        using (var fill = new SolidBrush(Theme.Field))
-        using (var border = new Pen(Theme.FieldBorder, 1f))
-        {
-            g.FillPath(fill, path);
-            g.DrawPath(border, path);
-        }
+        if (Bounds.Width < 2 || Bounds.Height < 2) return;
+        var outer = new Rect(0.5, 0.5, Bounds.Width - 1, Bounds.Height - 1);
+        g.DrawRectangle(Look.Brush(Look.Field), Look.Pen(Look.FieldBorder, 1), Look.Rounded(outer, Radius(outer.Height)));
 
         for (int i = 0; i < _labels.Length; i++)
         {
@@ -92,52 +80,64 @@ internal sealed class ViewToggle : Control
             bool selected = i == _selected;
             if (selected || i == _hover)
             {
-                using var path = Theme.Rounded(rect, Radius(rect.Height));
-                using var fill = new SolidBrush(selected ? Theme.AccentDim : Theme.FieldHover);
-                g.FillPath(fill, path);
-                if (selected)
-                {
-                    using var border = new Pen(Theme.AccentBorder, 1f);
-                    g.DrawPath(border, path);
-                }
+                // WinForms drew these whole-pixel rectangles with crisp outlines; half a pixel in keeps them crisp here.
+                var shape = Look.Rounded(rect.Translate(new Vector(0.5, 0.5)), Radius(rect.Height));
+                g.DrawRectangle(Look.Brush(selected ? Look.AccentDim : Look.FieldHover),
+                    selected ? Look.Pen(Look.AccentBorder, 1) : null, shape);
             }
 
-            Color fore = selected ? Theme.Gold : i == _hover ? Theme.Text : Theme.TextMuted;
-            TextRenderer.DrawText(g, _labels[i], SegmentFont, rect, fore,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            var fore = selected ? Look.Gold : i == _hover ? Look.Text : Look.TextMuted;
+            Look.DrawText(g, _labels[i], SegmentFont, fore, rect, TextAlignment.Center);
         }
     }
 
     // A pill in most styles; square tabs in Angelic.
-    private float Radius(float height) => Theme.Style switch
+    private static double Radius(double height) => Look.Style switch
     {
-        UiStyle.Angelic => 0f,
-        UiStyle.Dark => 6f * Theme.Scale(this),
-        _ => height / 2f
+        UiStyle.Angelic => 0,
+        UiStyle.Dark => 6,
+        _ => height / 2
     };
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPointerMoved(PointerEventArgs e)
     {
-        int hit = HitTest(e.Location);
-        if (hit != _hover)
-        {
-            _hover = hit;
-            Invalidate();
-        }
-        base.OnMouseMove(e);
+        base.OnPointerMoved(e);
+        int hit = SegmentAt(e.GetPosition(this));
+        if (hit == _hover) return;
+        _hover = hit;
+        InvalidateVisual();
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnPointerExited(PointerEventArgs e)
     {
+        base.OnPointerExited(e);
         _hover = -1;
-        Invalidate();
-        base.OnMouseLeave(e);
+        InvalidateVisual();
     }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && HitTest(e.Location) is var hit and >= 0) Selected = hit;
-        base.OnMouseClick(e);
+        base.OnPointerPressed(e);
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        _pressed = true;
+        e.Pointer.Capture(this);
+        e.Handled = true;
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        if (e.InitialPressMouseButton != MouseButton.Left || !_pressed) return;
+        _pressed = false;
+        e.Pointer.Capture(null);
+        e.Handled = true;
+        var point = e.GetPosition(this);
+        if (new Rect(Bounds.Size).Contains(point) && SegmentAt(point) is var hit and >= 0) Selected = hit;
+    }
+
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
+    {
+        base.OnPointerCaptureLost(e);
+        _pressed = false;
     }
 }

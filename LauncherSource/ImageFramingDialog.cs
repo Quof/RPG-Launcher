@@ -1,59 +1,35 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Platform;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
 /// <summary>Lets the user choose which part of a picture fills the 16:9 card.</summary>
-internal sealed class ImageFramingDialog : Form
+internal sealed class ImageFramingDialog : DialogWindow
 {
     private readonly FramingCanvas _canvas;
-    private readonly Label _hint;
-    private readonly Label _zoomLabel;
+    private readonly TextBlock _hint;
+    private readonly TextBlock _zoomLabel;
     private readonly PillButton _zoomOut;
     private readonly PillButton _zoomIn;
     private readonly PillButton _reset;
     private readonly PillButton _save;
     private readonly PillButton _cancel;
-    private readonly Font _hintFont = Theme.Font(8.6f);
-    private readonly Font _zoomFont = Theme.Font(9f, FontStyle.Bold);
+    private readonly UiFont _hintFont = Look.Font(8.6);
+    private readonly UiFont _zoomFont = Look.Font(9, bold: true);
+    private double _canvasW, _canvasH;
 
     public ImageFraming Framing => _canvas.Framing.Clone();
 
+    /// <param name="image">The picture, e.g. from <see cref="GameImageLoader.LoadSourcePicture"/>; the caller disposes it.</param>
     public ImageFramingDialog(Bitmap image, ImageFraming? framing, string gameTitle)
     {
-        Text = "Image framing \u00b7 " + gameTitle;
-        BackColor = Theme.Bg;
-        ForeColor = Theme.Text;
-        Font = Theme.Font(9f);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        StartPosition = FormStartPosition.CenterParent;
-        MaximizeBox = false;
-        MinimizeBox = false;
-        ShowInTaskbar = false;
-        ShowIcon = false;
-        AutoScaleMode = AutoScaleMode.None;
-        KeyPreview = true;
+        Title = "Image framing \u00b7 " + gameTitle;
 
         _canvas = new FramingCanvas(image, framing?.Clone() ?? new ImageFraming());
         _canvas.FramingChanged += UpdateZoomLabel;
 
-        _hint = new Label
-        {
-            Text = "Drag to move \u00b7 scroll to zoom",
-            Font = _hintFont,
-            ForeColor = Theme.TextDim,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true
-        };
-        _zoomLabel = new Label
-        {
-            Font = _zoomFont,
-            ForeColor = Theme.TextMuted,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleCenter
-        };
+        _hint = Ui.Label("Drag to move \u00b7 scroll to zoom", _hintFont, Look.TextDim);
+        _zoomLabel = Ui.Label("", _zoomFont, Look.TextMuted, TextAlignment.Center);
 
         _zoomOut = new PillButton { Text = "−" };
         _zoomIn = new PillButton { Text = "+" };
@@ -64,90 +40,102 @@ internal sealed class ImageFramingDialog : Form
         _zoomOut.Click += (_, _) => _canvas.ZoomBy(1 / 1.2);
         _zoomIn.Click += (_, _) => _canvas.ZoomBy(1.2);
         _reset.Click += (_, _) => _canvas.ResetFraming();
-        _save.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
-        _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+        _save.Click += (_, _) => Accept();
+        _cancel.Click += (_, _) => Cancel();
 
-        Controls.AddRange(new Control[] { _canvas, _hint, _zoomLabel, _zoomOut, _zoomIn, _reset, _save, _cancel });
-
-        KeyDown += (_, e) =>
-        {
-            if (e.KeyCode == Keys.Enter) { DialogResult = DialogResult.OK; Close(); }
-            else if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); }
-            else if (e.KeyCode is Keys.Add or Keys.Oemplus) _canvas.ZoomBy(1.2);
-            else if (e.KeyCode is Keys.Subtract or Keys.OemMinus) _canvas.ZoomBy(1 / 1.2);
-        };
+        var backdrop = new Backdrop(PaintBackdrop);
+        Body.Children.AddRange(new Control[] { backdrop, _canvas, _hint, _zoomLabel, _zoomOut, _zoomIn, _reset, _save, _cancel });
 
         UpdateZoomLabel();
+        SizeToScreen(Screens?.Primary);
+
+        const double pad = 20, buttonH = 36;
+        Body.Layout = size =>
+        {
+            Body.Place(backdrop, 0, 0, size.Width, size.Height);
+            Body.Place(_canvas, pad, pad, _canvasW, _canvasH);
+            Body.Place(_hint, pad, pad + _canvasH + 10, _canvasW, 20);
+
+            double y = size.Height - pad - buttonH;
+            const double small = 38;
+            Body.Place(_zoomOut, pad, y, small, buttonH);
+            Body.Place(_zoomLabel, pad + small + 4, y, 58, buttonH);
+            Body.Place(_zoomIn, pad + small + 4 + 58 + 4, y, small, buttonH);
+            Body.Place(_reset, pad + small + 4 + 58 + 4 + small + 12, y, 84, buttonH);
+
+            const double buttonW = 96;
+            Body.Place(_save, size.Width - pad - buttonW, y, buttonW, buttonH);
+            Body.Place(_cancel, size.Width - pad - buttonW - 10 - buttonW, y, buttonW, buttonH);
+        };
+    }
+
+    /// <summary>Shows the dialog with its canvas sized for the screen <paramref name="owner"/> is on; true when saved.</summary>
+    public override Task<bool> ShowAsync(Window owner)
+    {
+        SizeToScreen(owner.Screens?.ScreenFromWindow(owner) ?? owner.Screens?.Primary);
+        return base.ShowAsync(owner);
+    }
+
+    /// <summary>Sizes the canvas to the picture's shape, within what fits on the screen.</summary>
+    private void SizeToScreen(Screen? screen)
+    {
+        // working area in device-independent pixels; without one only the fixed limits apply
+        var area = screen is { WorkingArea: { Width: > 0, Height: > 0 } working }
+            ? new Size(working.Width / screen.Scaling, working.Height / screen.Scaling)
+            : new Size(double.MaxValue / 4, double.MaxValue / 4);
+        double pad = 20;
+        double maxW = Math.Min(900, area.Width - 80);
+        double maxH = Math.Min(620, area.Height - 220);
+        var imageSize = _canvas.ImageSize;
+        double fit = Math.Min(maxW / imageSize.Width, maxH / imageSize.Height);
+        // At least wide enough for the zoom buttons and Reset on the left and Cancel and Save on the right.
+        _canvasW = Math.Max(460, (int)(imageSize.Width * fit));
+        _canvasH = Math.Max(240, (int)(imageSize.Height * fit));
+
+        double buttonH = 36;
+        double width = _canvasW + pad * 2;
+        SetClientSize(width, pad + _canvasH + 10 + 20 + 14 + buttonH + pad);
     }
 
     private void UpdateZoomLabel() => _zoomLabel.Text = $"{_canvas.Framing.Zoom * 100:0}%";
 
-    protected override void OnHandleCreated(EventArgs e)
+    protected override void OnKeyDown(KeyEventArgs e)
     {
-        base.OnHandleCreated(e);
-        try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
+        base.OnKeyDown(e);
+        if (e.Key == Key.Enter) Accept();
+        else if (e.Key == Key.Escape) Cancel();
+        else if (e.Key is Key.Add or Key.OemPlus) _canvas.ZoomBy(1.2);
+        else if (e.Key is Key.Subtract or Key.OemMinus) _canvas.ZoomBy(1 / 1.2);
+        else return;
+        e.Handled = true;
     }
 
-    protected override void OnLoad(EventArgs e)
+    // Blob style: a blob sits between the zoom controls and Cancel.
+    private void PaintBackdrop(DrawingContext g, Size size) =>
+        Mascots.DrawCentered(g, MascotSpot.FramingDialog, (Body.PlaceOf(_reset).Right + Body.PlaceOf(_cancel).Left) / 2,
+            size.Height, 50);
+
+    /// <summary>Paints under the dialog's controls, as the form's OnPaint did.</summary>
+    private sealed class Backdrop : Control
     {
-        base.OnLoad(e);
-        float scale = Theme.Scale(this);
-        int R(float value) => (int)Math.Round(value * scale);
+        private readonly Action<DrawingContext, Size> _paint;
 
-        // Size the canvas to the picture's shape, within what fits on screen.
-        var area = Screen.FromControl(Owner ?? this).WorkingArea;
-        int pad = R(20f);
-        int maxW = Math.Min(R(900f), area.Width - R(80f));
-        int maxH = Math.Min(R(620f), area.Height - R(220f));
-        var imageSize = _canvas.ImageSize;
-        float fit = Math.Min(maxW / (float)imageSize.Width, maxH / (float)imageSize.Height);
-        int canvasW = Math.Max(R(420f), (int)(imageSize.Width * fit));
-        int canvasH = Math.Max(R(240f), (int)(imageSize.Height * fit));
-
-        int buttonH = R(36f);
-        int width = canvasW + pad * 2;
-        ClientSize = new Size(width, pad + canvasH + R(10f) + R(20f) + R(14f) + buttonH + pad);
-
-        _canvas.SetBounds(pad, pad, canvasW, canvasH);
-        _hint.SetBounds(pad, _canvas.Bottom + R(10f), canvasW, R(20f));
-
-        int y = ClientSize.Height - pad - buttonH;
-        int small = R(38f);
-        _zoomOut.Bounds = new Rectangle(pad, y, small, buttonH);
-        _zoomLabel.SetBounds(_zoomOut.Right + R(4f), y, R(58f), buttonH);
-        _zoomIn.Bounds = new Rectangle(_zoomLabel.Right + R(4f), y, small, buttonH);
-        _reset.Bounds = new Rectangle(_zoomIn.Right + R(12f), y, R(84f), buttonH);
-
-        int buttonW = R(96f);
-        _save.Bounds = new Rectangle(width - pad - buttonW, y, buttonW, buttonH);
-        _cancel.Bounds = new Rectangle(_save.Left - R(10f) - buttonW, y, buttonW, buttonH);
-        CenterToParent();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        // Blob style: a blob sits between the zoom controls and Cancel.
-        Mascots.DrawCentered(e.Graphics, MascotSpot.FramingDialog, (_reset.Right + _cancel.Left) / 2f,
-            ClientSize.Height, 50f * Theme.Scale(this));
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
+        public Backdrop(Action<DrawingContext, Size> paint)
         {
-            _hintFont.Dispose();
-            _zoomFont.Dispose();
+            _paint = paint;
+            IsHitTestVisible = false;
         }
-        base.Dispose(disposing);
+
+        public override void Render(DrawingContext g) => _paint(g, Bounds.Size);
     }
 
-    private sealed class FramingCanvas : Control
+    private sealed class FramingCanvas : Control, ICustomHitTest
     {
         private readonly Bitmap _image;
+        private readonly SharpPicture _picture = new();
         private bool _dragging;
         private Point _dragStart;
-        private PointF _dragStartCenter;
+        private Point _dragStartCenter;
 
         public ImageFraming Framing { get; }
         public Size ImageSize => _image.Size;
@@ -157,43 +145,42 @@ internal sealed class ImageFramingDialog : Form
         {
             _image = image;
             Framing = framing;
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            BackColor = Theme.Canvas;
-            Cursor = Cursors.SizeAll;
+            Cursor = new Cursor(StandardCursorType.SizeAll);
             Normalize();
         }
 
+        public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
         /// <summary>Where the whole picture is drawn inside the canvas.</summary>
-        private RectangleF ImageRect()
+        private Rect ImageRect()
         {
-            float fit = Math.Min(Width / (float)_image.Width, Height / (float)_image.Height);
-            float w = _image.Width * fit, h = _image.Height * fit;
-            return new RectangleF((Width - w) / 2f, (Height - h) / 2f, w, h);
+            double fit = Math.Min(Bounds.Width / ImageSize.Width, Bounds.Height / ImageSize.Height);
+            double w = ImageSize.Width * fit, h = ImageSize.Height * fit;
+            return new Rect((Bounds.Width - w) / 2, (Bounds.Height - h) / 2, w, h);
         }
 
-        private RectangleF CropOnCanvas()
+        private Rect CropOnCanvas()
         {
             var image = ImageRect();
-            var crop = ImageFraming.CropRect(_image.Size, Framing);
-            float s = image.Width / _image.Width;
-            return new RectangleF(image.X + crop.X * s, image.Y + crop.Y * s, crop.Width * s, crop.Height * s);
+            var crop = ImageFraming.CropRect(ImageSize, Framing);
+            double s = image.Width / ImageSize.Width;
+            return new Rect(image.X + crop.X * s, image.Y + crop.Y * s, crop.Width * s, crop.Height * s);
         }
 
         /// <summary>Keeps the stored center where the clamped crop actually is.</summary>
         private void Normalize()
         {
             Framing.Zoom = Math.Clamp(Framing.Zoom, 1.0, ImageFraming.MaxZoom);
-            var crop = ImageFraming.CropRect(_image.Size, Framing);
-            Framing.CenterX = (crop.X + crop.Width / 2.0) / _image.Width;
-            Framing.CenterY = (crop.Y + crop.Height / 2.0) / _image.Height;
+            var crop = ImageFraming.CropRect(ImageSize, Framing);
+            Framing.CenterX = (crop.X + crop.Width / 2.0) / ImageSize.Width;
+            Framing.CenterY = (crop.Y + crop.Height / 2.0) / ImageSize.Height;
         }
 
         public void ZoomBy(double factor)
         {
             Framing.Zoom = Math.Clamp(Framing.Zoom * factor, 1.0, ImageFraming.MaxZoom);
             Normalize();
-            Invalidate();
+            InvalidateVisual();
             FramingChanged?.Invoke();
         }
 
@@ -203,88 +190,89 @@ internal sealed class ImageFramingDialog : Form
             Framing.CenterY = 0.5;
             Framing.Zoom = 1.0;
             Normalize();
-            Invalidate();
+            InvalidateVisual();
             FramingChanged?.Invoke();
         }
 
-        protected override void OnMouseDown(MouseEventArgs e)
+        protected override void OnPointerPressed(PointerPressedEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
-            {
-                _dragging = true;
-                _dragStart = e.Location;
-                _dragStartCenter = new PointF((float)Framing.CenterX, (float)Framing.CenterY);
-                Capture = true;
-            }
-            base.OnMouseDown(e);
+            base.OnPointerPressed(e);
+            if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+            _dragging = true;
+            _dragStart = e.GetPosition(this);
+            _dragStartCenter = new Point(Framing.CenterX, Framing.CenterY);
+            e.Pointer.Capture(this);
         }
 
-        protected override void OnMouseMove(MouseEventArgs e)
+        protected override void OnPointerMoved(PointerEventArgs e)
         {
-            if (_dragging)
-            {
-                var image = ImageRect();
-                Framing.CenterX = _dragStartCenter.X + (e.X - _dragStart.X) / image.Width;
-                Framing.CenterY = _dragStartCenter.Y + (e.Y - _dragStart.Y) / image.Height;
-                Normalize();
-                Invalidate();
-                FramingChanged?.Invoke();
-            }
-            base.OnMouseMove(e);
+            base.OnPointerMoved(e);
+            if (!_dragging) return;
+            var image = ImageRect();
+            var point = e.GetPosition(this);
+            Framing.CenterX = _dragStartCenter.X + (point.X - _dragStart.X) / image.Width;
+            Framing.CenterY = _dragStartCenter.Y + (point.Y - _dragStart.Y) / image.Height;
+            Normalize();
+            InvalidateVisual();
+            FramingChanged?.Invoke();
         }
 
-        protected override void OnMouseUp(MouseEventArgs e)
+        protected override void OnPointerReleased(PointerReleasedEventArgs e)
         {
+            base.OnPointerReleased(e);
             _dragging = false;
-            Capture = false;
-            base.OnMouseUp(e);
+            e.Pointer.Capture(null);
         }
 
-        protected override void OnMouseWheel(MouseEventArgs e)
+        protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
         {
-            ZoomBy(e.Delta > 0 ? 1.1 : 1 / 1.1);
-            base.OnMouseWheel(e);
+            base.OnPointerCaptureLost(e);
+            _dragging = false;
         }
 
-        protected override void OnMouseEnter(EventArgs e)
+        protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
         {
-            Focus();
-            base.OnMouseEnter(e);
+            base.OnPointerWheelChanged(e);
+            // Only the vertical wheel zooms, as WinForms' MouseWheel.
+            if (e.Delta.Y == 0) return;
+            ZoomBy(e.Delta.Y > 0 ? 1.1 : 1 / 1.1);
+            e.Handled = true;
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        public override void Render(DrawingContext g)
         {
-            var g = e.Graphics;
-            g.Clear(BackColor);
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.FillRectangle(Look.Brush(Look.Canvas), new Rect(Bounds.Size));
 
             var image = ImageRect();
-            g.DrawImage(_image, image);
+            _picture.Draw(g, this, _image, image);
 
             // Dim everything the card will not show.
             var crop = CropOnCanvas();
-            using (var outside = new Region(image))
+            var outside = new StreamGeometry();
+            using (var ctx = outside.Open())
             {
-                outside.Exclude(crop);
-                using var dim = new SolidBrush(Color.FromArgb(165, 8, 8, 12));
-                g.FillRegion(dim, outside);
-            }
-
-            using (var thirds = new Pen(Color.FromArgb(70, 255, 255, 255), 1f))
-            {
-                for (int i = 1; i <= 2; i++)
+                ctx.SetFillRule(FillRule.EvenOdd);
+                foreach (var rect in new[] { image, crop })
                 {
-                    float x = crop.Left + crop.Width * i / 3f;
-                    float y = crop.Top + crop.Height * i / 3f;
-                    g.DrawLine(thirds, x, crop.Top, x, crop.Bottom);
-                    g.DrawLine(thirds, crop.Left, y, crop.Right, y);
+                    ctx.BeginFigure(rect.TopLeft, true);
+                    ctx.LineTo(rect.TopRight);
+                    ctx.LineTo(rect.BottomRight);
+                    ctx.LineTo(rect.BottomLeft);
+                    ctx.EndFigure(true);
                 }
             }
+            g.DrawGeometry(Look.Brush(Color.FromArgb(165, 8, 8, 12)), null, outside);
 
-            using var border = new Pen(Theme.Gold, 2f);
-            g.DrawRectangle(border, crop.X, crop.Y, crop.Width, crop.Height);
+            var thirds = Look.Pen(Color.FromArgb(70, 255, 255, 255), 1);
+            for (int i = 1; i <= 2; i++)
+            {
+                double x = crop.Left + crop.Width * i / 3;
+                double y = crop.Top + crop.Height * i / 3;
+                g.DrawLine(thirds, new Point(x, crop.Top), new Point(x, crop.Bottom));
+                g.DrawLine(thirds, new Point(crop.Left, y), new Point(crop.Right, y));
+            }
+
+            g.DrawRectangle(null, Look.Pen(Look.Gold, 2), crop);
         }
     }
 }

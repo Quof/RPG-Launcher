@@ -1,18 +1,45 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
-internal sealed class PillButton : Control
+/// <summary>Icons a <see cref="PillButton"/> can show, drawn as shapes so they look the same on every system.</summary>
+internal enum PillIcon
+{
+    None,
+    Refresh,
+    More
+}
+
+internal sealed class PillButton : Control, ICustomHitTest
 {
     private bool _hover;
     private bool _pressed;
-    private readonly Font _iconFont = new("Segoe MDL2 Assets", 11.5f, FontStyle.Regular, GraphicsUnit.Point);
+    private bool _checked;
+    private string _text = "";
 
-    public string? IconGlyph { get; set; }
+    static PillButton() => AffectsRender<PillButton>(IsEffectivelyEnabledProperty);
+
+    public PillButton()
+    {
+        Cursor = new Cursor(StandardCursorType.Hand);
+        Focusable = false;
+    }
+
+    public string Text
+    {
+        get => _text;
+        set
+        {
+            _text = value ?? "";
+            InvalidateVisual();
+        }
+    }
+
+    public PillIcon Icon { get; set; }
     public bool ShowHeart { get; set; }
     public bool DrawChevron { get; set; }
+    public UiFont Font { get; set; } = Look.Font(9.5);
 
-    private bool _checked;
     public bool Checked
     {
         get => _checked;
@@ -20,151 +47,161 @@ internal sealed class PillButton : Control
         {
             if (_checked == value) return;
             _checked = value;
-            Invalidate();
+            InvalidateVisual();
         }
     }
 
-    public PillButton()
+    public event EventHandler? Click;
+
+    public void PerformClick() => Click?.Invoke(this, EventArgs.Empty);
+
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    private const double IconSize = 15;
+    private const double ChevronWidth = 18;
+
+    /// <summary>Width that fits the icon, text and chevron with the usual padding.</summary>
+    public double PreferredWidth()
     {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        SetStyle(ControlStyles.Selectable, false);
-        // Transparent so the corners outside the rounded shape show the parent, not a flat square.
-        SetStyle(ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-        TabStop = false;
-        Cursor = Cursors.Hand;
-        Font = Theme.Font(9.5f);
-        Size = new Size(100, 38);
+        bool hasIcon = ShowHeart || Icon != PillIcon.None;
+        bool hasText = _text.Length > 0;
+        double textW = hasText ? Look.Measure(_text, Font).Width : 0;
+        return (hasIcon ? IconSize : 0) + (hasIcon && hasText ? 8 : 0) + textW + (DrawChevron ? ChevronWidth : 0) + 32;
     }
 
-    protected override void OnMouseEnter(EventArgs e)
+    protected override void OnPointerEntered(PointerEventArgs e)
     {
+        base.OnPointerEntered(e);
         _hover = true;
-        Invalidate();
-        base.OnMouseEnter(e);
+        InvalidateVisual();
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnPointerExited(PointerEventArgs e)
     {
+        base.OnPointerExited(e);
         _hover = false;
         _pressed = false;
-        Invalidate();
-        base.OnMouseLeave(e);
+        InvalidateVisual();
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        if (e.Button == MouseButtons.Left)
-        {
-            _pressed = true;
-            Invalidate();
-        }
-        base.OnMouseDown(e);
+        base.OnPointerPressed(e);
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        _pressed = true;
+        e.Pointer.Capture(this);
+        e.Handled = true;
+        InvalidateVisual();
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
+        base.OnPointerReleased(e);
+        if (e.InitialPressMouseButton != MouseButton.Left || !_pressed) return;
         _pressed = false;
-        Invalidate();
-        base.OnMouseUp(e);
+        e.Pointer.Capture(null);
+        e.Handled = true;
+        InvalidateVisual();
+        if (new Rect(Bounds.Size).Contains(e.GetPosition(this))) PerformClick();
     }
 
-    public void PerformClick() => OnClick(EventArgs.Empty);
-
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        base.OnPointerCaptureLost(e);
+        _pressed = false;
+        InvalidateVisual();
+    }
 
-        float scale = Theme.Scale(this);
-        var rect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-        float radius = Theme.ControlRadius * scale;
+    public override void Render(DrawingContext g)
+    {
+        double width = Bounds.Width, height = Bounds.Height;
+        if (width < 2 || height < 2) return;
+        using var faded = IsEffectivelyEnabled ? (DrawingContext.PushedState?)null : g.PushOpacity(0.5);
 
-        Color fill = Checked ? Theme.AccentDim : Theme.Field;
-        Color border = Checked ? Theme.AccentBorder : Theme.FieldBorder;
-        Color fg = Checked ? Theme.Gold : Theme.TextMuted;
-
+        var rect = new Rect(0.5, 0.5, width - 1, height - 1);
+        Color fill = Checked ? Look.AccentDim : Look.Field;
+        Color border = Checked ? Look.AccentBorder : Look.FieldBorder;
+        Color fg = Checked ? Look.Gold : Look.TextMuted;
         if (_hover)
         {
-            fill = Checked ? Theme.AccentHover : Theme.FieldHover;
-            fg = Checked ? Theme.GoldBright : Theme.Text;
+            fill = Checked ? Look.AccentHover : Look.FieldHover;
+            fg = Checked ? Look.GoldBright : Look.Text;
         }
-        if (_pressed) fill = Color.FromArgb(Checked ? 70 : 45, fill.R, fill.G, fill.B);
+        if (_pressed) fill = Look.Alpha(Checked ? 70 : 45, fill);
 
-        using var path = Theme.Rounded(rect, radius);
-        using (var brush = new SolidBrush(fill)) g.FillPath(brush, path);
-        using (var pen = new Pen(border, Theme.ControlBorderWidth)) g.DrawPath(pen, path);
+        g.DrawRectangle(Look.Brush(fill), Look.Pen(border, Look.ControlBorderWidth), Look.Rounded(rect, Look.ControlRadius));
 
-        float iconSize = Math.Max(14f, 15f * scale);
-        bool hasIcon = ShowHeart || !string.IsNullOrEmpty(IconGlyph);
-        bool hasText = !string.IsNullOrEmpty(Text);
-        float textW = hasText
-            ? TextRenderer.MeasureText(Text, Font, new Size(int.MaxValue, int.MaxValue),
-                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width
-            : 0f;
-        float gap = hasIcon && hasText ? 8f * scale : 0f;
-        float chevronW = DrawChevron ? 15f * scale : 0f;
-        float total = (hasIcon ? iconSize : 0f) + gap + textW + chevronW;
-        float start = Math.Max(8f * scale, (Width - total) / 2f);
+        bool hasIcon = ShowHeart || Icon != PillIcon.None;
+        bool hasText = _text.Length > 0;
+        double textW = hasText ? Look.Measure(_text, Font).Width : 0;
+        double gap = hasIcon && hasText ? 8 : 0;
+        double chevronW = DrawChevron ? ChevronWidth : 0;
+        double total = (hasIcon ? IconSize : 0) + gap + textW + chevronW;
+        double start = Math.Max(8, (width - total) / 2);
 
         if (ShowHeart)
         {
-            var heartRect = new RectangleF(start, (Height - iconSize) / 2f - 1f, iconSize, iconSize);
-            using var heart = Theme.Heart(heartRect);
-            if (Checked)
-            {
-                using var brush = new SolidBrush(fg);
-                g.FillPath(brush, heart);
-            }
-            else
-            {
-                using var pen = new Pen(fg, 1.8f) { LineJoin = LineJoin.Round };
-                g.DrawPath(pen, heart);
-            }
-            start += iconSize + gap;
+            var heart = Look.Heart(new Rect(start, (height - IconSize) / 2 - 1, IconSize, IconSize));
+            if (Checked) g.DrawGeometry(Look.Brush(fg), null, heart);
+            else g.DrawGeometry(null, Look.Pen(fg, 1.8, round: true), heart);
+            start += IconSize + gap;
         }
-        else if (!string.IsNullOrEmpty(IconGlyph))
+        else if (Icon != PillIcon.None)
         {
-            using var iconFormat = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center
-            };
-            using var brush = new SolidBrush(fg);
-            var iconRect = new RectangleF(start, 0, iconSize, Height);
-            g.DrawString(IconGlyph, _iconFont, brush, iconRect, iconFormat);
-            start += iconSize + gap;
+            DrawIcon(g, Icon, new Point(start + IconSize / 2, height / 2), fg);
+            start += IconSize + gap;
         }
 
         if (hasText)
         {
-            TextRenderer.DrawText(g, Text, Font,
-                new Rectangle((int)start, 0, (int)Math.Ceiling(textW) + 2, Height),
-                fg,
-                TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.SingleLine | TextFormatFlags.Left);
+            Look.DrawText(g, _text, Font, fg, new Rect(start, 0, Math.Ceiling(textW) + 2, height));
             start += textW;
         }
 
         if (DrawChevron)
         {
-            float cx = start + chevronW / 2f;
-            float cy = Height / 2f + 1f;
-            using var pen = new Pen(fg, 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            g.DrawLines(pen, new[]
-            {
-                new PointF(cx - 4f * scale, cy - 2f * scale),
-                new PointF(cx, cy + 2.5f * scale),
-                new PointF(cx + 4f * scale, cy - 2f * scale)
-            });
+            double cx = start + chevronW / 2 + 1.5, cy = height / 2 + 1;
+            g.DrawGeometry(null, Look.Pen(fg, 1.6, round: true),
+                Look.Lines(false, new Point(cx - 4, cy - 2), new Point(cx, cy + 2.5), new Point(cx + 4, cy - 2)));
         }
     }
 
-    protected override void Dispose(bool disposing)
+    private static void DrawIcon(DrawingContext g, PillIcon icon, Point center, Color color)
     {
-        if (disposing) _iconFont.Dispose();
-        base.Dispose(disposing);
+        switch (icon)
+        {
+            case PillIcon.More:
+                for (int i = -1; i <= 1; i++)
+                    g.DrawEllipse(Look.Brush(color), null, new Point(center.X + i * 5.5, center.Y), 1.45, 1.45);
+                break;
+
+            case PillIcon.Refresh:
+            {
+                // A circular arrow: most of a ring, with an arrowhead at its end.
+                const double radius = 5.6;
+                const double startAngle = -70, sweep = 290;
+                Point At(double degrees) => new(center.X + radius * Math.Cos(degrees * Math.PI / 180),
+                    center.Y + radius * Math.Sin(degrees * Math.PI / 180));
+                var arc = new StreamGeometry();
+                using (var ctx = arc.Open())
+                {
+                    ctx.BeginFigure(At(startAngle), false);
+                    ctx.ArcTo(At(startAngle + sweep), new Size(radius, radius), 0, true, SweepDirection.Clockwise);
+                    ctx.EndFigure(false);
+                }
+                g.DrawGeometry(null, Look.Pen(color, 1.5, round: true), arc);
+
+                // Arrowhead pointing along the ring at its end.
+                var tip = At(startAngle + sweep);
+                double tangent = (startAngle + sweep + 90) * Math.PI / 180;
+                double back = tangent + Math.PI;
+                var dir = new Vector(Math.Cos(tangent), Math.Sin(tangent));
+                var normal = new Vector(-dir.Y, dir.X);
+                var head = tip + dir * 1.6;
+                var baseCenter = head + new Vector(Math.Cos(back), Math.Sin(back)) * 4.2;
+                g.DrawGeometry(Look.Brush(color), null, Look.Lines(true, head, baseCenter + normal * 3, baseCenter - normal * 3));
+                break;
+            }
+        }
     }
 }

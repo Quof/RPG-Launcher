@@ -95,7 +95,8 @@ internal static class GameScanner
         {
             try
             {
-                var info = new FileInfo(Path.Combine(dir, file));
+                if (Paths.File(Path.Combine(dir, file.Replace('\\', Path.DirectorySeparatorChar))) is not { } path) continue;
+                var info = new FileInfo(path);
                 if (info.Exists)
                     builder.Append(file).Append(':').Append(info.Length).Append(':').Append(info.LastWriteTimeUtc.Ticks).Append(';');
             }
@@ -145,14 +146,12 @@ internal static class GameScanner
     /// <summary>RPG Maker MV and MZ: data/System.json, at the top or under www.</summary>
     private static GameEntry? CreateMvMz(string dir, string scanRoot)
     {
-        string dataRoot;
-        var direct = Path.Combine(dir, "data", "System.json");
-        var www = Path.Combine(dir, "www", "data", "System.json");
-        if (File.Exists(direct)) dataRoot = dir;
-        else if (File.Exists(www)) dataRoot = Path.Combine(dir, "www");
-        else return null;
+        var systemPath = Paths.File(Path.Combine(dir, "data", "System.json")) ??
+                         Paths.File(Path.Combine(dir, "www", "data", "System.json"));
+        if (systemPath is null) return null;
+        // the folder holding data, js and img: the game folder or its www
+        string dataRoot = Path.GetDirectoryName(Path.GetDirectoryName(systemPath)!)!;
 
-        var systemPath = Path.Combine(dataRoot, "data", "System.json");
         var system = ReadSystem(systemPath);
 
         var encryptionKey = !string.IsNullOrWhiteSpace(system.EncryptionKey)
@@ -188,13 +187,12 @@ internal static class GameScanner
     /// </summary>
     private static GameEntry? CreateRgss(string dir, string scanRoot)
     {
-        string ini = Path.Combine(dir, "Game.ini");
-        if (!File.Exists(ini)) return null;
+        if (Paths.File(Path.Combine(dir, "Game.ini")) is not { } ini) return null;
 
         string? archivePath = null;
         try
         {
-            archivePath = Directory.EnumerateFiles(dir, "*.rgss*")
+            archivePath = Directory.EnumerateFiles(dir, "*.rgss*", Paths.AnyCase)
                 .FirstOrDefault(p => Path.GetExtension(p).ToLowerInvariant() is ".rgssad" or ".rgss2a" or ".rgss3a");
         }
         catch
@@ -215,10 +213,10 @@ internal static class GameScanner
 
         // The title picture's name lives in the System data; VX always uses Graphics\System\Title.
         byte[]? system = null;
-        string looseSystem = Path.Combine(dir, "Data", found.SystemFile);
+        string? looseSystem = Paths.File(Path.Combine(dir, "Data", found.SystemFile));
         try
         {
-            system = File.Exists(looseSystem) ? File.ReadAllBytes(looseSystem) : archive?.Read(@"Data\" + found.SystemFile);
+            system = looseSystem is not null ? File.ReadAllBytes(looseSystem) : archive?.Read(@"Data\" + found.SystemFile);
         }
         catch
         {
@@ -231,8 +229,7 @@ internal static class GameScanner
             foreach (var extension in PictureExtensions)
             {
                 string relative = Path.Combine("Graphics", folder, name + extension);
-                string loose = Path.Combine(dir, relative);
-                if (File.Exists(loose)) return loose;
+                if (Paths.File(Path.Combine(dir, relative)) is { } loose) return loose;
                 if (archive?.Contains(relative) == true) return archivePath + RgssArchive.Separator + relative;
             }
             return null;
@@ -270,26 +267,27 @@ internal static class GameScanner
     /// <summary>RPG Maker 2000 and 2003: RPG_RT.exe with the database in RPG_RT.ldb.</summary>
     private static GameEntry? CreateRm2k(string dir, string scanRoot)
     {
-        string exe = Path.Combine(dir, "RPG_RT.exe");
-        string database = Path.Combine(dir, "RPG_RT.ldb");
-        if (!File.Exists(exe) && !File.Exists(database)) return null;
+        string? exe = Paths.File(Path.Combine(dir, "RPG_RT.exe"));
+        string? database = Paths.File(Path.Combine(dir, "RPG_RT.ldb"));
+        if (exe is null && database is null) return null;
 
-        var (titleName, is2003) = File.Exists(database) ? Rm2kFiles.ReadDatabase(database) : (null, false);
+        var (titleName, is2003) = database is not null ? Rm2kFiles.ReadDatabase(database) : (null, false);
         string? title1 = null;
         if (titleName is not null)
         {
             title1 = new[] { ".png", ".bmp", ".xyz" }
-                .Select(extension => Path.Combine(dir, "Title", titleName + extension))
-                .FirstOrDefault(File.Exists);
+                .Select(extension => Paths.File(Path.Combine(dir, "Title", titleName + extension)))
+                .FirstOrDefault(path => path is not null);
         }
 
         return new GameEntry
         {
             Key = KeyFor(dir, scanRoot),
             RootPath = dir,
-            ExecutablePath = File.Exists(exe) ? exe : FindExecutable(dir),
+            ExecutablePath = exe ?? FindExecutable(dir),
             DataRoot = dir,
-            Title = FirstNonEmpty(TextFiles.IniValue(Path.Combine(dir, "RPG_RT.ini"), "GameTitle"), Path.GetFileName(dir))!,
+            Title = FirstNonEmpty(Paths.File(Path.Combine(dir, "RPG_RT.ini")) is { } rtIni ? TextFiles.IniValue(rtIni, "GameTitle") : null,
+                Path.GetFileName(dir))!,
             Engine = is2003 ? "RPG Maker 2003" : "RPG Maker 2000",
             Title1Path = title1,
             FolderCreatedUtc = FolderCreatedUtc(dir)
@@ -302,13 +300,13 @@ internal static class GameScanner
     /// </summary>
     private static GameEntry? CreateWolf(string dir, string scanRoot)
     {
-        string data = Path.Combine(dir, "Data");
+        string? data = Paths.Folder(Path.Combine(dir, "Data"));
         bool wolf;
         try
         {
-            wolf = File.Exists(Path.Combine(dir, "GuruguruSMF4.dll")) || File.Exists(Path.Combine(dir, "Data.wolf")) ||
-                   Directory.Exists(Path.Combine(data, "BasicData")) ||
-                   (Directory.Exists(data) && Directory.EnumerateFiles(data, "*.wolf").Any());
+            wolf = Paths.File(Path.Combine(dir, "GuruguruSMF4.dll")) is not null || Paths.File(Path.Combine(dir, "Data.wolf")) is not null ||
+                   (data is not null && (Paths.Folder(Path.Combine(data, "BasicData")) is not null ||
+                                         Directory.EnumerateFiles(data, "*.wolf", Paths.AnyCase).Any()));
         }
         catch
         {
@@ -316,7 +314,8 @@ internal static class GameScanner
         }
         if (!wolf) return null;
 
-        string? exe = new[] { "Game.exe", "GamePro.exe" }.Select(name => Path.Combine(dir, name)).FirstOrDefault(File.Exists);
+        string? exe = new[] { "Game.exe", "GamePro.exe" }.Select(name => Paths.File(Path.Combine(dir, name)))
+            .FirstOrDefault(path => path is not null);
         if (exe is null) return null;
 
         return new GameEntry
@@ -385,8 +384,7 @@ internal static class GameScanner
     {
         try
         {
-            var path = Path.Combine(gameRoot, "package.json");
-            if (!File.Exists(path)) return null;
+            if (Paths.File(Path.Combine(gameRoot, "package.json")) is not { } path) return null;
             using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
             if (doc.RootElement.TryGetProperty("window", out var window) &&
                 window.TryGetProperty("title", out var title) &&
@@ -404,8 +402,8 @@ internal static class GameScanner
 
     private static string DetectEngine(string gameRoot, string dataRoot, string? packageName)
     {
-        bool mz = File.Exists(Path.Combine(dataRoot, "js", "rmmz_core.js"));
-        bool mv = File.Exists(Path.Combine(dataRoot, "js", "rpg_core.js"));
+        bool mz = Paths.File(Path.Combine(dataRoot, "js", "rmmz_core.js")) is not null;
+        bool mv = Paths.File(Path.Combine(dataRoot, "js", "rpg_core.js")) is not null;
         if (mz) return "RPG Maker MZ";
         if (mv) return "RPG Maker MV";
         if (string.Equals(packageName, "rmmz-game", StringComparison.OrdinalIgnoreCase)) return "RPG Maker MZ";
@@ -416,13 +414,12 @@ internal static class GameScanner
     {
         foreach (var name in new[] { "Game.exe", "game.exe", "nw.exe", "NW.exe" })
         {
-            var candidate = Path.Combine(gameRoot, name);
-            if (File.Exists(candidate)) return candidate;
+            if (Paths.File(Path.Combine(gameRoot, name)) is { } candidate) return candidate;
         }
 
         try
         {
-            return Directory.EnumerateFiles(gameRoot, "*.exe")
+            return Directory.EnumerateFiles(gameRoot, "*.exe", Paths.AnyCase)
                 .Where(p =>
                 {
                     var file = Path.GetFileName(p);
@@ -440,19 +437,16 @@ internal static class GameScanner
 
     private static string? FindTitleImage(string dataRoot, string? name, bool isTitle2)
     {
-        var dir = Path.Combine(dataRoot, "img", "titles1");
-        if (!Directory.Exists(dir)) return null;
+        if (Paths.Folder(Path.Combine(dataRoot, "img", "titles1")) is not { } dir) return null;
 
         if (!string.IsNullOrWhiteSpace(name))
         {
             var trimmed = name.Trim().Replace('/', Path.DirectorySeparatorChar);
-            var direct = Path.Combine(dir, trimmed);
-            if (File.Exists(direct)) return direct;
+            if (Paths.File(Path.Combine(dir, trimmed)) is { } direct) return direct;
 
             foreach (var ext in ImageExtensions)
             {
-                var candidate = Path.Combine(dir, trimmed + ext);
-                if (File.Exists(candidate)) return candidate;
+                if (Paths.File(Path.Combine(dir, trimmed + ext)) is { } candidate) return candidate;
             }
         }
 
@@ -478,8 +472,7 @@ internal static class GameScanner
         {
             foreach (var name in new[] { "icon.png", "icon.ico", "icon.bmp" })
             {
-                var path = Path.Combine(baseDir, "icon", name);
-                if (File.Exists(path)) return path;
+                if (Paths.File(Path.Combine(baseDir, "icon", name)) is { } path) return path;
             }
         }
         return null;
@@ -493,8 +486,7 @@ internal static class GameScanner
             {
                 try
                 {
-                    var path = Path.Combine(baseDir, "js", file);
-                    if (!File.Exists(path)) continue;
+                    if (Paths.File(Path.Combine(baseDir, "js", file)) is not { } path) continue;
                     // Stream line by line so a match near the top doesn't read the whole script.
                     foreach (var line in File.ReadLines(path, Encoding.UTF8))
                     {

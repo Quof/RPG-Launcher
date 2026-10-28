@@ -1,6 +1,5 @@
-using System.Drawing.Imaging;
 using System.IO.Compression;
-using System.Runtime.InteropServices;
+using SkiaSharp;
 
 namespace RpgLauncher;
 
@@ -76,7 +75,7 @@ internal static class Rm2kFiles
     /// Decodes an XYZ picture: "XYZ1", width and height, then zlib-compressed data holding a
     /// 256-colour palette and one palette index per pixel.
     /// </summary>
-    public static Bitmap? DecodeXyz(byte[] bytes)
+    public static SKBitmap? DecodeXyz(byte[] bytes)
     {
         try
         {
@@ -94,13 +93,7 @@ internal static class Rm2kFiles
                 int c = raw[768 + i] * 3;
                 pixels[i] = unchecked((int)0xFF000000) | (raw[c] << 16) | (raw[c + 1] << 8) | raw[c + 2];
             }
-
-            var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            var lockData = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            for (int y = 0; y < height; y++)
-                Marshal.Copy(pixels, y * width, lockData.Scan0 + y * lockData.Stride, width);
-            bitmap.UnlockBits(lockData);
-            return bitmap;
+            return ImageKit.FromArgb(pixels, width, height);
         }
         catch
         {

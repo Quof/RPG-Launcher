@@ -1,11 +1,10 @@
-using System.Diagnostics;
-using System.Drawing.Drawing2D;
 using System.Globalization;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
 /// <summary>New DLsite game releases grouped by day, newest first; only visible cards are painted.</summary>
-internal sealed class ReleasesView : Control
+internal sealed class ReleasesView : Control, ICustomHitTest
 {
     private sealed class Section
     {
@@ -17,15 +16,19 @@ internal sealed class ReleasesView : Control
         public int Bottom;
     }
 
-    private static readonly Font HeaderFont = Theme.Font(12f, FontStyle.Bold);
-    private static readonly Font HeaderCountFont = Theme.Font(9f);
-    private static readonly Font TitleFont = Theme.Font(9.4f, FontStyle.Bold);
-    private static readonly Font MakerFont = Theme.Font(8.4f);
-    private static readonly Font MetaFont = Theme.Font(8.4f);
-    private static readonly Font BadgeFont = Theme.Font(7.2f, FontStyle.Bold);
-    private static readonly Font EmptyFont = Theme.Font(11f, FontStyle.Bold);
-    private static readonly Font EmptyTextFont = Theme.Font(9.5f);
-    private static readonly Font MenuBoldFont = Theme.Font(9.5f, FontStyle.Bold);
+    private static readonly UiFont HeaderFont = Look.Font(12, bold: true);
+    private static readonly UiFont HeaderCountFont = Look.Font(9);
+    private static readonly UiFont TitleFont = Look.Font(9.4, bold: true);
+    private static readonly UiFont MakerFont = Look.Font(8.4);
+    private static readonly UiFont MetaFont = Look.Font(8.4);
+    private static readonly UiFont BadgeFont = Look.Font(7.2, bold: true);
+    private static readonly UiFont EmptyFont = Look.Font(11, bold: true);
+    private static readonly UiFont EmptyTextFont = Look.Font(9.5);
+
+    private static readonly Cursor HandCursor = new(StandardCursorType.Hand);
+
+    // Covers are decoded at the size they are drawn, so they are copied pixel for pixel.
+    private static readonly RenderOptions PixelCopy = new() { BitmapInterpolationMode = BitmapInterpolationMode.None };
 
     private readonly ReleaseCovers _covers;
     private List<ReleaseDay> _days = new();
@@ -37,8 +40,8 @@ internal sealed class ReleasesView : Control
     private int _maxScroll;
     private int _contentHeight;
     private bool _dragging;
-    private int _dragAnchorY;
-    private int _dragThumbStartY;
+    private double _dragAnchorY;
+    private double _dragThumbStartY;
     private bool _scrollbarHover;
 
     private int _cols = 1;
@@ -47,9 +50,12 @@ internal sealed class ReleasesView : Control
     private int _startX;
     private int _gap;
     private int _pad;
-    private Rectangle _imageRect;
+    private Rect _imageRect;
 
     private ReleaseItem? _hover;
+    private Point? _pointer;
+    private bool _clickPending;
+    private TopLevel? _topLevel;
 
     /// <summary>Raised from the right-click menu with the release and its release day.</summary>
     public event Action<ReleaseItem, DateTime>? InfoRequested;
@@ -69,11 +75,9 @@ internal sealed class ReleasesView : Control
 
     public ReleasesView(string coverDirectory)
     {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Bg;
-        _covers = new ReleaseCovers(this, coverDirectory);
-        _covers.Loaded += _ => Invalidate();
+        ClipToBounds = true;
+        _covers = new ReleaseCovers(coverDirectory);
+        _covers.Loaded += _ => InvalidateVisual();
     }
 
     public void SetDays(List<ReleaseDay> days, bool resetScroll = false)
@@ -111,6 +115,8 @@ internal sealed class ReleasesView : Control
 
     public void RefreshFilter() => Relayout(resetScroll: true);
 
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
     private bool Matches(ReleaseItem item, string[] tokens)
     {
         if (Tags is { IsEmpty: false } tags && !tags.Matches(item.TagsFor(_language)))
@@ -129,29 +135,28 @@ internal sealed class ReleasesView : Control
 
     private void Relayout(bool resetScroll = false)
     {
-        if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-        float s = Theme.Scale(this);
-        int R(float v) => (int)Math.Round(v * s);
-
-        int side = R(26f), reserve = R(14f);
-        _gap = R(16f);
-        _pad = R(10f);
-        int available = Math.Max(1, ClientSize.Width - side * 2 - reserve);
-        int minW = R(210f), maxW = R(290f);
+        // Avalonia lays a control out only after it is shown, so this also runs before there is a size:
+        // the sections are still filtered (ShownCount is right at once) and placed again on the first resize.
+        int width = (int)Bounds.Width, height = (int)Bounds.Height;
+        int side = 26, reserve = 14;
+        _gap = 16;
+        _pad = 10;
+        int available = Math.Max(1, width - side * 2 - reserve);
+        int minW = 210, maxW = 290;
         _cols = Math.Max(1, (available + _gap) / (minW + _gap));
         _cardW = Math.Min(maxW, Math.Max(1, (available - _gap * (_cols - 1)) / _cols));
         int totalW = _cols * _cardW + (_cols - 1) * _gap;
         _startX = side + Math.Max(0, (available - totalW) / 2);
 
-        int imageW = _cardW - _pad * 2;
+        int imageW = Math.Max(1, _cardW - _pad * 2);
         int imageH = (int)Math.Round(imageW * 0.75);
-        _imageRect = new Rectangle(_pad, _pad, imageW, imageH);
-        _cardH = _pad + imageH + R(8f) + R(36f) + R(18f) + R(20f) + _pad;
+        _imageRect = new Rect(_pad, _pad, imageW, imageH);
+        _cardH = _pad + imageH + 8 + 36 + 18 + 20 + _pad;
 
         var tokens = _filter.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         _sections.Clear();
-        int y = R(14f);
-        int headerH = R(42f);
+        int y = 14;
+        int headerH = 42;
         foreach (var day in _days)
         {
             var items = tokens.Length == 0 && (Tags is null || Tags.IsEmpty)
@@ -162,83 +167,88 @@ internal sealed class ReleasesView : Control
             var section = new Section { Day = day, Items = items, HeaderY = y, CardsY = y + headerH, Rows = rows };
             section.Bottom = section.CardsY + rows * _cardH + (rows - 1) * _gap;
             _sections.Add(section);
-            y = section.Bottom + R(20f);
+            y = section.Bottom + 20;
         }
 
-        _contentHeight = _sections.Count == 0 ? 0 : y + R(10f);
-        _maxScroll = Math.Max(0, _contentHeight - ClientSize.Height);
+        _contentHeight = _sections.Count == 0 ? 0 : y + 10;
+        _maxScroll = Math.Max(0, _contentHeight - height);
         if (resetScroll) _scroll = 0;
         _scroll = Math.Clamp(_scroll, 0, _maxScroll);
         _hover = null;
-        Invalidate();
+        InvalidateVisual();
     }
 
-    protected override void OnResize(EventArgs e)
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
-        base.OnResize(e);
+        base.OnSizeChanged(e);
         Relayout();
     }
 
-    public void ScrollByWheel(int delta)
+    /// <summary>Scrolls by mouse wheel notches; positive scrolls up.</summary>
+    public void ScrollByWheel(double notches)
     {
         if (_maxScroll <= 0) return;
-        int step = (int)Math.Round(delta / 120f * 96f * Theme.Scale(this));
+        int step = (int)Math.Round(notches * 96);
         int scroll = Math.Clamp(_scroll - step, 0, _maxScroll);
         if (scroll == _scroll) return;
         _scroll = scroll;
-        Invalidate();
-        UpdateHover(PointToClient(Cursor.Position));
+        InvalidateVisual();
+        if (_pointer is { } pointer) UpdateHover(pointer);
     }
 
     public void ScrollToTop()
     {
         _scroll = 0;
-        Invalidate();
+        InvalidateVisual();
     }
 
-    protected override void OnMouseWheel(MouseEventArgs e)
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
-        ScrollByWheel(e.Delta);
-        base.OnMouseWheel(e);
+        _pointer = e.GetPosition(this);
+        ScrollByWheel(e.Delta.Y);
+        e.Handled = true;
+        base.OnPointerWheelChanged(e);
     }
 
-    private Rectangle CardBounds(Section section, int index)
+    private Rect CardBounds(Section section, int index)
     {
         int col = index % _cols, row = index / _cols;
-        return new Rectangle(_startX + col * (_cardW + _gap),
+        return new Rect(_startX + col * (_cardW + _gap),
             section.CardsY + row * (_cardH + _gap) - _scroll, _cardW, _cardH);
     }
 
-    private ReleaseItem? ItemAt(Point point, out Rectangle bounds) => ItemAt(point, out bounds, out _);
+    private ReleaseItem? ItemAt(Point point, out Rect bounds) => ItemAt(point, out bounds, out _);
 
-    private ReleaseItem? ItemAt(Point point, out Rectangle bounds, out DateTime date)
+    private ReleaseItem? ItemAt(Point point, out Rect bounds, out DateTime date)
     {
-        bounds = Rectangle.Empty;
+        bounds = default;
         date = default;
-        int contentY = point.Y + _scroll;
+        double contentY = point.Y + _scroll;
         foreach (var section in _sections)
         {
             if (contentY < section.CardsY || contentY > section.Bottom) continue;
-            int row = (contentY - section.CardsY) / (_cardH + _gap);
-            int col = (point.X - _startX) / (_cardW + _gap);
+            int row = (int)((contentY - section.CardsY) / (_cardH + _gap));
+            int col = (int)((point.X - _startX) / (_cardW + _gap));
             if (col < 0 || col >= _cols || point.X < _startX) return null;
             int index = row * _cols + col;
             if (index >= section.Items.Count) return null;
             bounds = CardBounds(section, index);
             date = section.Day.Date;
-            return bounds.Contains(point) ? section.Items[index] : null;
+            return Contains(bounds, point) ? section.Items[index] : null;
         }
         return null;
     }
 
+    /// <summary>Point in rectangle, right and bottom edges excluded (as WinForms tested it).</summary>
+    private static bool Contains(Rect rect, Point point) =>
+        point.X >= rect.X && point.X < rect.Right && point.Y >= rect.Y && point.Y < rect.Bottom;
+
     // ---- painting ----
 
-    protected override void OnPaint(PaintEventArgs e)
+    public override void Render(DrawingContext g)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        using (var bg = new SolidBrush(Theme.Bg)) g.FillRectangle(bg, ClientRectangle);
+        var view = new Rect(Bounds.Size);
+        g.FillRectangle(Look.Brush(Look.Bg), view);
 
         if (_sections.Count == 0)
         {
@@ -246,12 +256,14 @@ internal sealed class ReleasesView : Control
             return;
         }
 
-        float s = Theme.Scale(this);
-        int viewTop = _scroll, viewBottom = _scroll + ClientSize.Height;
+        // Covers are decoded at device pixels so they stay sharp on scaled screens.
+        double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
+        var coverSize = new PixelSize((int)Math.Round(_imageRect.Width * scale), (int)Math.Round(_imageRect.Height * scale));
+        int viewTop = _scroll, viewBottom = _scroll + (int)Bounds.Height;
         foreach (var section in _sections)
         {
             if (section.Bottom < viewTop || section.HeaderY > viewBottom) continue;
-            DrawHeader(g, section, s);
+            DrawHeader(g, section);
 
             int firstRow = Math.Max(0, (viewTop - section.CardsY) / (_cardH + _gap));
             int lastRow = Math.Min(section.Rows - 1, (viewBottom - section.CardsY) / (_cardH + _gap));
@@ -262,309 +274,284 @@ internal sealed class ReleasesView : Control
                     int index = row * _cols + col;
                     if (index >= section.Items.Count) break;
                     var bounds = CardBounds(section, index);
-                    if (!bounds.IntersectsWith(e.ClipRectangle)) continue;
-                    var state = g.Save();
-                    g.TranslateTransform(bounds.X, bounds.Y);
-                    DrawCard(g, section.Items[index], s);
-                    g.Restore(state);
+                    if (!bounds.Intersects(view)) continue;
+                    using (g.PushTransform(Matrix.CreateTranslation(bounds.X, bounds.Y)))
+                        DrawCard(g, section.Items[index], coverSize);
                 }
             }
         }
 
-        if (_maxScroll > 0) DrawScrollbar(g, s);
+        if (_maxScroll > 0) DrawScrollbar(g);
     }
 
     private static string DayLabel(DateTime date)
     {
         var today = ReleaseStore.TodayJst();
         string name = date.ToString("ddd, MMM d", CultureInfo.GetCultureInfo("en-US"));
-        if (date == today) return "Today \u00b7 " + name;
-        if (date == today.AddDays(-1)) return "Yesterday \u00b7 " + name;
+        if (date == today) return "Today · " + name;
+        if (date == today.AddDays(-1)) return "Yesterday · " + name;
         return name;
     }
 
-    private void DrawHeader(Graphics g, Section section, float s)
+    private void DrawHeader(DrawingContext g, Section section)
     {
         int y = section.HeaderY - _scroll;
         string label = DayLabel(section.Day.Date);
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
-        var size = TextRenderer.MeasureText(g, label, HeaderFont, new Size(int.MaxValue, int.MaxValue), flags);
-        var rect = new Rectangle(_startX, y, size.Width + 2, (int)(30 * s));
-        TextRenderer.DrawText(g, label, HeaderFont, rect, Theme.Text, flags);
+        var rect = new Rect(_startX, y, Math.Ceiling(Look.Measure(label, HeaderFont).Width) + 2, 30);
+        Look.DrawText(g, label, HeaderFont, Look.Text, rect);
 
         int total = section.Day.Items.Count;
         string count = section.Items.Count == total
             ? $"{total} {(total == 1 ? "game" : "games")}"
             : $"{section.Items.Count} of {total} games";
-        TextRenderer.DrawText(g, count, HeaderCountFont,
-            new Rectangle(rect.Right + (int)(10 * s), y, (int)(200 * s), rect.Height), Theme.TextDim, flags);
+        Look.DrawText(g, count, HeaderCountFont, Look.TextDim, new Rect(rect.Right + 10, y, 200, rect.Height));
 
-        int lineY = y + (int)(36 * s);
-        using var pen = new Pen(Theme.Divider, Theme.IsLight ? 1.5f : 1f);
-        g.DrawLine(pen, _startX, lineY, _startX + _cols * _cardW + (_cols - 1) * _gap, lineY);
+        double lineY = y + 36 + 0.5;
+        g.DrawLine(Look.Pen(Look.Divider, Look.IsLight ? 1.5 : 1),
+            new Point(_startX, lineY), new Point(_startX + _cols * _cardW + (_cols - 1) * _gap, lineY));
     }
 
-    private static readonly StringFormat TitleFormat = new()
-    {
-        Trimming = StringTrimming.EllipsisCharacter,
-        FormatFlags = StringFormatFlags.LineLimit
-    };
-
-    private void DrawCard(Graphics g, ReleaseItem item, float s)
+    private void DrawCard(DrawingContext g, ReleaseItem item, PixelSize coverSize)
     {
         bool hover = ReferenceEquals(item, _hover);
-        float inset = Theme.BorderWidth / 2f;
-        var card = new RectangleF(inset, inset, _cardW - Theme.BorderWidth, _cardH - Theme.BorderWidth);
-        using (var path = Theme.Rounded(card, Math.Max(0f, Theme.CardRadius - 2f) * s))
-        using (var fill = new SolidBrush(hover ? Theme.CardHover : Theme.Card))
-        using (var border = new Pen(hover ? Theme.CardBorderHover : Theme.CardBorder, Theme.BorderWidth))
+        double inset = Look.BorderWidth / 2;
+        var card = new Rect(inset, inset, _cardW - Look.BorderWidth, _cardH - Look.BorderWidth);
+        g.DrawRectangle(Look.Brush(hover ? Look.CardHover : Look.Card),
+            Look.Pen(hover ? Look.CardBorderHover : Look.CardBorder, Look.BorderWidth),
+            Look.Rounded(card, Math.Max(0, Look.CardRadius - 2)));
+
+        var cover = _covers.Get(item, coverSize);
+        var clip = Look.Rounded(_imageRect, Math.Max(0, Look.ImageRadius - 1));
+        if (cover is not null)
         {
-            g.FillPath(fill, path);
-            g.DrawPath(border, path);
+            using (g.PushClip(clip))
+            using (g.PushRenderOptions(PixelCopy))
+                g.DrawImage(cover, new Rect(cover.Size), _imageRect);
+        }
+        else
+        {
+            g.DrawRectangle(Look.Gradient(Look.PlaceholderTop, Look.PlaceholderBottom, 45), null, clip);
+            Look.DrawText(g, item.ProductId, MakerFont, Look.TextDim, _imageRect, TextAlignment.Center);
         }
 
-        var cover = _covers.Get(item, _imageRect.Size);
-        using (var clip = Theme.Rounded(_imageRect, Math.Max(0f, Theme.ImageRadius - 1f) * s))
-        {
-            if (cover is not null)
-            {
-                var state = g.Save();
-                g.SetClip(clip);
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                g.PixelOffsetMode = PixelOffsetMode.Half;
-                g.DrawImage(cover, _imageRect);
-                g.Restore(state);
-            }
-            else
-            {
-                using var placeholder = new LinearGradientBrush(_imageRect,
-                    Theme.PlaceholderTop, Theme.PlaceholderBottom, 45f);
-                g.FillPath(placeholder, clip);
-                Theme.DrawText(g, item.ProductId, MakerFont, Theme.TextDim, _imageRect, StringAlignment.Center);
-            }
+        if (hover)
+            g.DrawRectangle(Look.Brush(Color.FromArgb(40, 255, 255, 255)), null, clip);
 
-            if (hover)
-            {
-                using var veil = new SolidBrush(Color.FromArgb(40, 255, 255, 255));
-                g.FillPath(veil, clip);
-            }
-        }
-
-        float bx = _imageRect.Left + 7f * s, by = _imageRect.Top + 7f * s;
+        double bx = _imageRect.Left + 7, by = _imageRect.Top + 7;
         if (item.DiscountPercent > 0)
-            bx += DrawBadge(g, $"-{item.DiscountPercent}%", bx, by, Theme.Gold, Color.FromArgb(225, 24, 20, 12), s) + 5f * s;
+            bx += DrawBadge(g, $"-{item.DiscountPercent}%", bx, by, Look.Gold, Color.FromArgb(225, 24, 20, 12)) + 5;
         if (item.HasEnglish)
-            DrawBadge(g, "EN", bx, by, Color.FromArgb(150, 200, 255), Color.FromArgb(225, 12, 18, 30), s);
+            DrawBadge(g, "EN", bx, by, Color.FromRgb(150, 200, 255), Color.FromArgb(225, 12, 18, 30));
         if (IsOwned?.Invoke(item.ProductId) == true)
         {
-            float w = MeasureBadge(g, "IN LIBRARY", s);
-            DrawBadge(g, "IN LIBRARY", _imageRect.Right - 7f * s - w, by, Theme.Success, Color.FromArgb(225, 9, 22, 14), s);
+            double w = MeasureBadge("IN LIBRARY");
+            DrawBadge(g, "IN LIBRARY", _imageRect.Right - 7 - w, by, Look.Success, Color.FromArgb(225, 9, 22, 14));
         }
 
-        float textX = _pad;
-        float textW = _cardW - _pad * 2;
-        float y = _imageRect.Bottom + 8f * s;
-        using (var brush = new SolidBrush(Theme.Text))
-            g.DrawString(item.Title, TitleFont, brush, new RectangleF(textX, y, textW, 36f * s), TitleFormat);
-        y += 36f * s;
+        double textX = _pad;
+        double textW = _cardW - _pad * 2;
+        double y = _imageRect.Bottom + 8;
+        Look.DrawText(g, item.Title, TitleFont, Look.Text, new Rect(textX, y, textW, 36),
+            TextAlignment.Left, TextLine.Top, wrap: true);
+        y += 36;
 
-        Theme.DrawText(g, item.MakerFor(_language), MakerFont, Theme.TextMuted, new RectangleF(textX, y, textW, 18f * s));
-        y += 18f * s;
+        Look.DrawText(g, item.MakerFor(_language), MakerFont, Look.TextMuted, new Rect(textX, y, textW, 18));
+        y += 18;
 
         string price = item.Price > 0 ? "¥" + item.Price.ToString("N0", CultureInfo.InvariantCulture) : "Free";
         string type = item.TypeFor(_language);
-        var metaRect = new RectangleF(textX, y, textW, 20f * s);
-        var metaFlags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter |
-                        TextFormatFlags.PreserveGraphicsTranslateTransform | TextFormatFlags.PreserveGraphicsClipping;
-        var metaBox = Rectangle.Round(metaRect);
-        // GDI+ (title, circle) indents text slightly; nudge the GDI line to match.
-        metaBox.X += (int)Math.Round(2f * s);
-        metaBox.Width -= (int)Math.Round(2f * s);
-        int priceX = metaBox.X;
+        var metaRect = new Rect(textX, y, textW, 20);
+        double priceX = metaRect.X;
         if (!string.IsNullOrEmpty(type))
         {
-            string prefix = type + " \u00b7 ";
-            TextRenderer.DrawText(g, prefix, MetaFont, metaBox, Theme.TextDim, metaFlags);
-            priceX += TextRenderer.MeasureText(g, prefix, MetaFont, metaBox.Size, metaFlags).Width;
+            string prefix = type + " · ";
+            Look.DrawText(g, prefix, MetaFont, Look.TextDim, metaRect);
+            priceX += Look.Measure(prefix, MetaFont).Width;
         }
-        TextRenderer.DrawText(g, price, MetaFont,
-            new Rectangle(priceX, metaBox.Y, Math.Max(1, metaBox.Right - priceX), metaBox.Height),
-            item.DiscountPercent > 0 ? Theme.Gold : Theme.TextMuted, metaFlags);
+        Look.DrawText(g, price, MetaFont, item.DiscountPercent > 0 ? Look.Gold : Look.TextMuted,
+            new Rect(priceX, metaRect.Y, Math.Max(1, metaRect.Right - priceX), metaRect.Height));
         if (item.Rating is { } rating)
         {
-            Theme.DrawText(g, $"★ {rating:0.0} ({item.RatingCount})", MetaFont, Theme.TextMuted, metaRect,
-                StringAlignment.Far);
+            Look.DrawText(g, $"★ {rating:0.0} ({item.RatingCount})", MetaFont, Look.TextMuted, metaRect,
+                TextAlignment.Right);
         }
     }
 
-    private static float MeasureBadge(Graphics g, string text, float s) =>
-        g.MeasureString(text, BadgeFont).Width + 8f * s;
+    // GDI+ measured text with 1/6 em of room on each side; it is kept so badges stay the same size.
+    private static double MeasureBadge(string text) =>
+        Look.Measure(text, BadgeFont).Width + BadgeFont.Size / 3 + 8;
 
-    private static float DrawBadge(Graphics g, string text, float x, float y, Color fore, Color back, float s)
+    private static double DrawBadge(DrawingContext g, string text, double x, double y, Color fore, Color back)
     {
-        float w = MeasureBadge(g, text, s);
-        var rect = new RectangleF(x, y, w, 17f * s);
-        using (var path = Theme.Rounded(rect, 4f * s))
-        using (var brush = new SolidBrush(back))
-            g.FillPath(brush, path);
-        Theme.DrawText(g, text, BadgeFont, fore, rect, StringAlignment.Center);
+        double w = MeasureBadge(text);
+        var rect = new Rect(x, y, w, 17);
+        g.DrawRectangle(Look.Brush(back), null, Look.Rounded(rect, 4));
+        Look.DrawText(g, text, BadgeFont, fore, rect, TextAlignment.Center);
         return w;
     }
 
-    private void DrawEmpty(Graphics g)
+    private void DrawEmpty(DrawingContext g)
     {
-        float s = Theme.Scale(this);
-        float w = Math.Min(ClientSize.Width - 60f * s, 560f * s);
-        float cx = ClientSize.Width / 2f, cy = ClientSize.Height / 2f - 30f * s;
+        double width = Bounds.Width, height = Bounds.Height;
+        double w = Math.Min(width - 60, 560);
+        double cx = width / 2, cy = height / 2 - 30;
         var blob = Loading ? Mascots.For(MascotSpot.ReleasesLoading) : Mascots.Enabled ? Mascots.Empty : null;
         if (blob is not null)
         {
-            float h = 110f * s;
-            Mascots.Draw(g, blob, cx - blob.Width * h / blob.Height / 2f, cy - 10f * s, h);
+            double h = 110;
+            Mascots.Draw(g, blob, cx - Mascots.WidthAt(blob, h) / 2, cy - 10, h);
         }
-        Theme.DrawText(g, EmptyTitle, EmptyFont, Theme.Text,
-            new RectangleF(cx - w / 2f, cy, w, 30f * s), StringAlignment.Center);
+        Look.DrawText(g, EmptyTitle, EmptyFont, Look.Text, new Rect(cx - w / 2, cy, w, 30), TextAlignment.Center);
         if (!string.IsNullOrEmpty(EmptyText))
-            Theme.DrawText(g, EmptyText, EmptyTextFont, Theme.TextMuted,
-                new RectangleF(cx - w / 2f, cy + 32f * s, w, 24f * s), StringAlignment.Center);
+            Look.DrawText(g, EmptyText, EmptyTextFont, Look.TextMuted, new Rect(cx - w / 2, cy + 32, w, 24),
+                TextAlignment.Center);
     }
 
     // ---- scrollbar ----
 
-    private RectangleF ScrollThumb(float s)
+    private Rect ScrollThumb()
     {
-        float trackTop = 12f * s;
-        float track = Math.Max(1f, ClientSize.Height - 24f * s);
-        float thumbH = Math.Min(track, Math.Max(36f * s, track * ClientSize.Height / Math.Max(1f, _contentHeight)));
-        float progress = _maxScroll <= 0 ? 0f : _scroll / (float)_maxScroll;
-        return new RectangleF(ClientSize.Width - 12f * s, trackTop + (track - thumbH) * progress, 5f * s, thumbH);
+        double height = Bounds.Height;
+        double trackTop = 12;
+        double track = Math.Max(1, height - 24);
+        double thumbH = Math.Min(track, Math.Max(36, track * height / Math.Max(1, _contentHeight)));
+        double progress = _maxScroll <= 0 ? 0 : _scroll / (double)_maxScroll;
+        return new Rect(Bounds.Width - 12, trackTop + (track - thumbH) * progress, 5, thumbH);
     }
 
-    private void DrawScrollbar(Graphics g, float s)
+    private void DrawScrollbar(DrawingContext g)
     {
-        var thumb = ScrollThumb(s);
-        using (var track = new SolidBrush(Theme.ScrollTrack))
-        using (var path = Theme.Rounded(new RectangleF(thumb.Left, 12f * s, thumb.Width,
-                   Math.Max(1f, ClientSize.Height - 24f * s)), thumb.Width / 2f))
-            g.FillPath(track, path);
-        using (var brush = new SolidBrush(_scrollbarHover || _dragging
-                   ? Theme.ScrollThumbActive : Theme.ScrollThumb))
-        using (var path = Theme.Rounded(thumb, thumb.Width / 2f))
-            g.FillPath(brush, path);
+        var thumb = ScrollThumb();
+        g.DrawRectangle(Look.Brush(Look.ScrollTrack), null,
+            Look.Rounded(new Rect(thumb.Left, 12, thumb.Width, Math.Max(1, Bounds.Height - 24)), thumb.Width / 2));
+        g.DrawRectangle(Look.Brush(_scrollbarHover || _dragging ? Look.ScrollThumbActive : Look.ScrollThumb), null,
+            Look.Rounded(thumb, thumb.Width / 2));
     }
 
     private bool IsOverScrollbar(Point p)
     {
         if (_maxScroll <= 0) return false;
-        float s = Theme.Scale(this);
-        return p.X >= ClientSize.Width - 22f * s;
+        return p.X >= Bounds.Width - 22;
     }
 
     // ---- mouse ----
 
     private void UpdateHover(Point point)
     {
-        var item = IsOverScrollbar(point) || !ClientRectangle.Contains(point) ? null : ItemAt(point, out _);
+        var item = IsOverScrollbar(point) || !Contains(new Rect(Bounds.Size), point) ? null : ItemAt(point, out _);
         if (!ReferenceEquals(item, _hover))
         {
             _hover = item;
-            Invalidate();
+            InvalidateVisual();
         }
-        Cursor = item is not null || IsOverScrollbar(point) ? Cursors.Hand : Cursors.Default;
+        Cursor = item is not null || IsOverScrollbar(point) ? HandCursor : Cursor.Default;
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPointerMoved(PointerEventArgs e)
     {
+        var point = e.GetPosition(this);
+        _pointer = point;
         if (_dragging)
         {
-            float s = Theme.Scale(this);
-            float trackTop = 12f * s;
-            float travel = Math.Max(1f, ClientSize.Height - 24f * s - ScrollThumb(s).Height);
-            float newY = Math.Clamp(_dragThumbStartY + (e.Y - _dragAnchorY), trackTop, trackTop + travel);
+            double trackTop = 12;
+            double travel = Math.Max(1, Bounds.Height - 24 - ScrollThumb().Height);
+            double newY = Math.Clamp(_dragThumbStartY + (point.Y - _dragAnchorY), trackTop, trackTop + travel);
             int scroll = (int)Math.Round((newY - trackTop) / travel * _maxScroll);
             if (scroll != _scroll)
             {
                 _scroll = scroll;
-                Invalidate();
+                InvalidateVisual();
             }
             return;
         }
 
-        bool over = IsOverScrollbar(e.Location);
+        bool over = IsOverScrollbar(point);
         if (over != _scrollbarHover)
         {
             _scrollbarHover = over;
-            Invalidate();
+            InvalidateVisual();
         }
-        UpdateHover(e.Location);
-        base.OnMouseMove(e);
+        UpdateHover(point);
+        base.OnPointerMoved(e);
     }
 
-    protected override void OnMouseLeave(EventArgs e)
+    protected override void OnPointerExited(PointerEventArgs e)
     {
+        _pointer = null;
         if (_hover is not null || _scrollbarHover)
         {
             _hover = null;
             _scrollbarHover = false;
-            Invalidate();
+            InvalidateVisual();
         }
-        base.OnMouseLeave(e);
+        base.OnPointerExited(e);
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && IsOverScrollbar(e.Location))
+        var point = e.GetPosition(this);
+        bool left = e.GetCurrentPoint(this).Properties.IsLeftButtonPressed;
+        // A WinForms click: pressed and released inside, but not the second press of a double-click.
+        _clickPending = left && e.ClickCount % 2 == 1;
+        if (left && IsOverScrollbar(point))
         {
-            float s = Theme.Scale(this);
-            var thumb = ScrollThumb(s);
-            if (!thumb.Contains(e.Location))
+            var thumb = ScrollThumb();
+            if (!Contains(thumb, point))
             {
-                float trackTop = 12f * s;
-                float travel = Math.Max(1f, ClientSize.Height - 24f * s - thumb.Height);
-                float progress = Math.Clamp((e.Y - trackTop - thumb.Height / 2f) / travel, 0f, 1f);
+                double trackTop = 12;
+                double travel = Math.Max(1, Bounds.Height - 24 - thumb.Height);
+                double progress = Math.Clamp((point.Y - trackTop - thumb.Height / 2) / travel, 0, 1);
                 _scroll = (int)Math.Round(progress * _maxScroll);
-                thumb = ScrollThumb(s);
+                thumb = ScrollThumb();
             }
-            _dragAnchorY = e.Y;
-            _dragThumbStartY = (int)thumb.Top;
+            _dragAnchorY = point.Y;
+            _dragThumbStartY = thumb.Top;
             _dragging = true;
-            Capture = true;
-            Invalidate();
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            InvalidateVisual();
             return;
         }
-        base.OnMouseDown(e);
+        base.OnPointerPressed(e);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
+        var point = e.GetPosition(this);
+        bool click = _clickPending && e.InitialPressMouseButton == MouseButton.Left && Contains(new Rect(Bounds.Size), point);
+        _clickPending = false;
+        // WinForms raised the click before MouseUp, while a scrollbar drag still counted as dragging.
+        if (click && !_dragging && !IsOverScrollbar(point) && ItemAt(point, out _) is { } clicked)
+            OpenUrl(clicked.Url);
+
         if (_dragging)
         {
             _dragging = false;
-            Capture = false;
-            Invalidate();
+            e.Pointer.Capture(null);
+            InvalidateVisual();
             return;
         }
 
-        if (e.Button == MouseButtons.Right && ItemAt(e.Location, out _, out var date) is { } item)
-            ShowMenu(item, date, e.Location);
-        base.OnMouseUp(e);
+        if (e.InitialPressMouseButton == MouseButton.Right && ItemAt(point, out _, out var date) is { } item)
+            ShowMenu(item, date, point);
+        base.OnPointerReleased(e);
     }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && !_dragging && !IsOverScrollbar(e.Location) &&
-            ItemAt(e.Location, out _) is { } item)
-            OpenUrl(item.Url);
-        base.OnMouseClick(e);
+        base.OnPointerCaptureLost(e);
+        if (!_dragging) return;
+        _dragging = false;
+        InvalidateVisual();
     }
 
     private void ShowMenu(ReleaseItem item, DateTime date, Point location)
     {
         var menu = Menus.Create();
         var open = Menus.Item("Open on DLsite", (_, _) => OpenUrl(item.Url));
-        open.Font = MenuBoldFont;
+        open.Bold = true;
         menu.Items.Add(open);
-        menu.Items.Add(Menus.Item("Release info\u2026", (_, _) => InfoRequested?.Invoke(item, date)));
+        menu.Items.Add(Menus.Item("Release info…", (_, _) => InfoRequested?.Invoke(item, date)));
         menu.Items.Add(Menus.Item("Search Nepchan", (_, _) =>
             OpenUrl("https://nepchan.org/v?q=" + Uri.EscapeDataString(MetadataService.CleanTitle(item.Title)))));
         menu.Items.Add(Menus.Separator());
@@ -573,9 +560,16 @@ internal sealed class ReleasesView : Control
         Menus.Show(menu, this, location);
     }
 
-    private static void CopyText(string text)
+    private async void CopyText(string text)
     {
-        try { Clipboard.SetText(text); } catch { /* clipboard busy */ }
+        try
+        {
+            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(text);
+        }
+        catch
+        {
+            // clipboard busy
+        }
     }
 
     private static void OpenUrl(string url)
@@ -583,7 +577,7 @@ internal sealed class ReleasesView : Control
         if (!WebLinks.IsTrusted(url)) return;
         try
         {
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Shell.OpenUrl(url);
         }
         catch
         {
@@ -591,9 +585,24 @@ internal sealed class ReleasesView : Control
         }
     }
 
-    protected override void Dispose(bool disposing)
+    // ---- window ----
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        if (disposing) _covers.Dispose();
-        base.Dispose(disposing);
+        base.OnAttachedToVisualTree(e);
+        _topLevel = TopLevel.GetTopLevel(this);
+        if (_topLevel is not null) _topLevel.ScalingChanged += OnScalingChanged;
     }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        if (_topLevel is not null) _topLevel.ScalingChanged -= OnScalingChanged;
+        _topLevel = null;
+        // What WinForms did in Dispose; covers load again if the view comes back.
+        _covers.Clear();
+    }
+
+    // Covers are decoded at device pixels: on another screen's scale they are decoded again.
+    private void OnScalingChanged(object? sender, EventArgs e) => InvalidateVisual();
 }

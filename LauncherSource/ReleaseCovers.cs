@@ -1,5 +1,4 @@
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
+using SkiaSharp;
 
 namespace RpgLauncher;
 
@@ -14,22 +13,19 @@ internal sealed class ReleaseCovers : IDisposable
     private readonly LinkedList<string> _recent = new();
     private readonly HashSet<string> _pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _failed = new(StringComparer.OrdinalIgnoreCase);
-    private Size _size;
+    private PixelSize _size;
     private CancellationTokenSource _cts = new();
 
     /// <summary>Raised on the UI thread when a cover finishes loading.</summary>
     public event Action<string>? Loaded;
 
-    private readonly Control _owner;
-
-    public ReleaseCovers(Control owner, string directory)
+    public ReleaseCovers(string directory)
     {
-        _owner = owner;
         _directory = directory;
     }
 
-    /// <summary>Returns the cover at <paramref name="size"/>, or null while it loads.</summary>
-    public Bitmap? Get(ReleaseItem item, Size size)
+    /// <summary>Returns the cover at <paramref name="size"/> (device pixels), or null while it loads.</summary>
+    public Bitmap? Get(ReleaseItem item, PixelSize size)
     {
         if (size.Width <= 0 || size.Height <= 0) return null;
         if (size != _size)
@@ -53,7 +49,7 @@ internal sealed class ReleaseCovers : IDisposable
         return null;
     }
 
-    private async Task LoadAsync(ReleaseItem item, Size size, CancellationToken token)
+    private async Task LoadAsync(ReleaseItem item, PixelSize size, CancellationToken token)
     {
         Bitmap? bitmap = null;
         try
@@ -77,34 +73,27 @@ internal sealed class ReleaseCovers : IDisposable
             Diagnostics.Log($"Cover {item.ProductId} failed: {ex.Message}");
         }
 
-        try
+        Dispatcher.UIThread.Post(() =>
         {
-            _owner.BeginInvoke(new Action(() =>
+            _pending.Remove(item.ProductId);
+            if (token.IsCancellationRequested || size != _size)
             {
-                _pending.Remove(item.ProductId);
-                if (token.IsCancellationRequested || size != _size)
-                {
-                    bitmap?.Dispose();
-                    return;
-                }
-                if (bitmap is null)
-                {
-                    _failed.Add(item.ProductId);
-                    return;
-                }
-                _bitmaps[item.ProductId] = bitmap;
-                Touch(item.ProductId);
-                Trim();
-                Loaded?.Invoke(item.ProductId);
-            }));
-        }
-        catch
-        {
-            bitmap?.Dispose();
-        }
+                bitmap?.Dispose();
+                return;
+            }
+            if (bitmap is null)
+            {
+                _failed.Add(item.ProductId);
+                return;
+            }
+            _bitmaps[item.ProductId] = bitmap;
+            Touch(item.ProductId);
+            Trim();
+            Loaded?.Invoke(item.ProductId);
+        });
     }
 
-    private async Task<Bitmap?> LoadOrDownloadAsync(ReleaseItem item, Size size, CancellationToken token)
+    private async Task<Bitmap?> LoadOrDownloadAsync(ReleaseItem item, PixelSize size, CancellationToken token)
     {
         // Small cards use DLsite's 300px resize; large or high-DPI cards use the full image.
         bool large = size.Width > 300;
@@ -121,14 +110,13 @@ internal sealed class ReleaseCovers : IDisposable
             File.Move(temp, path, overwrite: true);
         }
 
-        using var stream = new MemoryStream(await File.ReadAllBytesAsync(path, token).ConfigureAwait(false), writable: false);
-        using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false);
+        using var image = ImageKit.Decode(await File.ReadAllBytesAsync(path, token).ConfigureAwait(false))
+                          ?? throw new InvalidDataException("not a picture");
 
-        var output = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppPArgb);
-        using var g = Graphics.FromImage(output);
-        g.Clear(Theme.Card);
-        Theme.DrawCover(g, image, new RectangleF(0, 0, size.Width, size.Height));
-        return output;
+        using var output = ImageKit.Create(size.Width, size.Height, Look.Card);
+        using (var canvas = new SKCanvas(output))
+            ImageKit.DrawCover(canvas, image, SKRect.Create(size.Width, size.Height));
+        return ImageKit.ToAvalonia(output);
     }
 
     private void Touch(string id)
@@ -147,7 +135,8 @@ internal sealed class ReleaseCovers : IDisposable
         }
     }
 
-    private void Clear()
+    /// <summary>Stops loading and frees the decoded covers; they load again when next asked for.</summary>
+    public void Clear()
     {
         _cts.Cancel();
         _cts = new CancellationTokenSource();

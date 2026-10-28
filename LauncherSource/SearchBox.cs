@@ -1,161 +1,174 @@
-using System.Drawing.Drawing2D;
+using Avalonia.Rendering;
 
 namespace RpgLauncher;
 
-internal sealed class SearchBox : Control
+/// <summary>The header's search field: a rounded box with a magnifier, cue text and a clear button.</summary>
+internal sealed class SearchBox : Control, ICustomHitTest
 {
-    private readonly CueTextBox _text;
+    private const double Pad = 13;
+    private const double IconSize = 15;
+    private const double IconGap = 9;
+    private const double ClearSize = 13;
+
+    private readonly TextBox _text;
+    private readonly Cursor _hand = new(StandardCursorType.Hand);
+    private readonly Cursor _beam = new(StandardCursorType.Ibeam);
     private bool _focused;
     private bool _hoverClear;
-    private RectangleF _clearRect;
 
     public event EventHandler? TextValueChanged;
 
     public string TextValue
     {
-        get => _text.Text;
+        get => _text.Text ?? "";
         set => _text.Text = value ?? string.Empty;
     }
 
     public SearchBox()
     {
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        SetStyle(ControlStyles.Selectable, false);
-        // Transparent so the corners outside the rounded field show the header gradient, not a flat square.
-        SetStyle(ControlStyles.SupportsTransparentBackColor, true);
-        TabStop = false;
-        BackColor = Color.Transparent;
-
-        _text = new CueTextBox
-        {
-            BorderStyle = BorderStyle.None,
-            BackColor = Theme.Field,
-            ForeColor = Theme.Text,
-            Font = Theme.Font(9.5f),
-            CueText = "Search games\u2026",
-            TabStop = false
-        };
+        Focusable = false;
+        Cursor = _beam;
+        _text = PlainTextBox(Look.Font(9.5), "Search games…");
+        _text.IsTabStop = false;
         _text.TextChanged += (_, _) =>
         {
-            PositionTextBox();
-            Invalidate();
+            // the clear button takes room from the text once there is text
+            InvalidateMeasure();
+            InvalidateVisual();
             TextValueChanged?.Invoke(this, EventArgs.Empty);
         };
-        _text.GotFocus += (_, _) => { _focused = true; _text.Invalidate(); Invalidate(); };
-        _text.LostFocus += (_, _) => { _focused = false; _text.Invalidate(); Invalidate(); };
-        Controls.Add(_text);
-        Size = new Size(270, 38);
+        _text.GotFocus += (_, _) =>
+        {
+            _focused = true;
+            InvalidateVisual();
+        };
+        _text.LostFocus += (_, _) =>
+        {
+            _focused = false;
+            InvalidateVisual();
+        };
+        VisualChildren.Add(_text);
+        LogicalChildren.Add(_text);
     }
 
-    protected override void OnLayout(LayoutEventArgs e)
+    /// <summary>Puts the caret in the search text.</summary>
+    public new bool Focus(NavigationMethod method = NavigationMethod.Unspecified, KeyModifiers keyModifiers = KeyModifiers.None) =>
+        _text.Focus(method, keyModifiers);
+
+    public bool HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+
+    private bool HasText => !string.IsNullOrEmpty(_text.Text);
+
+    private Rect TextRect(Size size)
     {
-        base.OnLayout(e);
-        PositionTextBox();
+        double left = Pad + IconSize + IconGap;
+        double right = Pad + (HasText ? 26 : 0);
+        return new Rect(left, 1, Math.Max(20, size.Width - left - right), Math.Max(0, size.Height - 2));
     }
 
-    protected override void OnResize(EventArgs e)
+    private Rect ClearRect()
     {
-        base.OnResize(e);
-        PositionTextBox();
+        double x = Bounds.Width - Pad - ClearSize, y = (Bounds.Height - ClearSize) / 2;
+        return new Rect(x - 4, y - 4, ClearSize + 8, ClearSize + 8);
     }
 
-    private void PositionTextBox()
+    protected override Size MeasureOverride(Size availableSize)
     {
-        if (_text is null) return;
-        float scale = Theme.Scale(this);
-        int pad = (int)Math.Round(13f * scale);
-        int icon = (int)Math.Round(15f * scale);
-        int gap = (int)Math.Round(9f * scale);
-        int left = pad + icon + gap;
-        int right = pad + (string.IsNullOrEmpty(_text.Text) ? 0 : (int)Math.Round(26f * scale));
-        int height = _text.PreferredHeight;
-        int width = Math.Max(20, Width - left - right);
-        _text.Bounds = new Rectangle(left, Math.Max(0, (Height - height) / 2), width, height);
+        var size = new Size(double.IsInfinity(availableSize.Width) ? 270 : availableSize.Width,
+            double.IsInfinity(availableSize.Height) ? 38 : availableSize.Height);
+        _text.Measure(TextRect(size).Size);
+        return size;
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override Size ArrangeOverride(Size finalSize)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _text.Arrange(TextRect(finalSize));
+        return finalSize;
+    }
 
-        float scale = Theme.Scale(this);
-        var rect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
-        using var path = Theme.Rounded(rect, Theme.ControlRadius * scale);
-        using (var brush = new SolidBrush(Theme.Field)) g.FillPath(brush, path);
-        using (var pen = new Pen(_focused ? Theme.CardBorderHover : Theme.FieldBorder, Theme.ControlBorderWidth + 0.2f))
-            g.DrawPath(pen, path);
+    public override void Render(DrawingContext g)
+    {
+        double width = Bounds.Width, height = Bounds.Height;
+        if (width < 2 || height < 2) return;
+        var rect = new Rect(0.5, 0.5, width - 1, height - 1);
+        g.DrawRectangle(Look.Brush(Look.Field),
+            Look.Pen(_focused ? Look.CardBorderHover : Look.FieldBorder, Look.ControlBorderWidth + 0.2),
+            Look.Rounded(rect, Look.ControlRadius));
 
         // magnifier
-        float icon = 15f * scale;
-        float cx = 13f * scale + icon / 2f;
-        float cy = Height / 2f;
-        float radius = 5.2f * scale;
-        using (var pen = new Pen(_focused ? Theme.Gold : Theme.TextDim, 1.7f)
-                   { StartCap = LineCap.Round, EndCap = LineCap.Round })
-        {
-            g.DrawEllipse(pen, cx - radius, cy - radius, radius * 2f, radius * 2f);
-            g.DrawLine(pen, cx + radius * 0.55f, cy + radius * 0.55f, cx + radius * 1.45f, cy + radius * 1.45f);
-        }
+        double cx = Pad + IconSize / 2, cy = height / 2, radius = 5.2;
+        var pen = Look.Pen(_focused ? Look.Gold : Look.TextDim, 1.7, round: true);
+        g.DrawEllipse(null, pen, new Point(cx, cy), radius, radius);
+        g.DrawLine(pen, new Point(cx + radius * 0.55, cy + radius * 0.55), new Point(cx + radius * 1.45, cy + radius * 1.45));
 
-        if (!string.IsNullOrEmpty(_text.Text))
+        if (HasText)
         {
-            float clearSize = 13f * scale;
-            float clearX = Width - 13f * scale - clearSize;
-            float clearY = (Height - clearSize) / 2f;
-            _clearRect = new RectangleF(clearX - 4f * scale, clearY - 4f * scale,
-                clearSize + 8f * scale, clearSize + 8f * scale);
-            using var pen = new Pen(_hoverClear ? Theme.Text : Theme.TextDim, 1.6f)
-                { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            g.DrawLine(pen, clearX, clearY, clearX + clearSize, clearY + clearSize);
-            g.DrawLine(pen, clearX + clearSize, clearY, clearX, clearY + clearSize);
-        }
-        else
-        {
-            _clearRect = RectangleF.Empty;
+            double x = width - Pad - ClearSize, y = (height - ClearSize) / 2;
+            var cross = Look.Pen(_hoverClear ? Look.Text : Look.TextDim, 1.6, round: true);
+            g.DrawLine(cross, new Point(x, y), new Point(x + ClearSize, y + ClearSize));
+            g.DrawLine(cross, new Point(x + ClearSize, y), new Point(x, y + ClearSize));
         }
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        if (_clearRect.Contains(e.Location) && !string.IsNullOrEmpty(_text.Text))
+        base.OnPointerPressed(e);
+        // Presses on the text itself are the text box's.
+        if (!ReferenceEquals(e.Source, this)) return;
+        e.Handled = true;
+        if (HasText && ClearRect().Contains(e.GetPosition(this)))
         {
             _text.Clear();
             _text.Focus();
             return;
         }
         _text.Focus();
-        base.OnMouseDown(e);
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    protected override void OnPointerMoved(PointerEventArgs e)
     {
-        bool overClear = _clearRect.Contains(e.Location);
+        base.OnPointerMoved(e);
+        bool overClear = HasText && ClearRect().Contains(e.GetPosition(this));
         if (overClear != _hoverClear)
         {
             _hoverClear = overClear;
-            Invalidate();
+            InvalidateVisual();
         }
-        Cursor = overClear ? Cursors.Hand : Cursors.IBeam;
-        base.OnMouseMove(e);
+        Cursor = overClear ? _hand : _beam;
     }
 
-    public new void Focus() => _text.Focus();
-
-    private sealed class CueTextBox : TextBox
+    protected override void OnPointerExited(PointerEventArgs e)
     {
-        public string CueText { get; set; } = "";
+        base.OnPointerExited(e);
+        if (!_hoverClear) return;
+        _hoverClear = false;
+        InvalidateVisual();
+    }
 
-        protected override void WndProc(ref Message m)
+    /// <summary>
+    /// A text box without a border or fill of its own, for a field its parent draws. The cue shows in
+    /// <see cref="Look.TextDim"/> while the box is empty and unfocused, like a WinForms cue banner.
+    /// </summary>
+    internal static TextBox PlainTextBox(UiFont font, string cue)
+    {
+        var box = Ui.TextBox(font);
+        box.Padding = new Thickness(0);
+        box.BorderThickness = new Thickness(0);
+        box.Background = Brushes.Transparent;
+        // The theme's hover and focus states take their fill and outline from these resources.
+        box.Resources["TextControlBackgroundPointerOver"] = Brushes.Transparent;
+        box.Resources["TextControlBackgroundFocused"] = Brushes.Transparent;
+        box.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        box.Watermark = cue;
+        box.TemplateApplied += (_, e) =>
         {
-            base.WndProc(ref m);
-
-            if (m.Msg == 0x000F && TextLength == 0 && !Focused && CueText.Length > 0)
-            {
-                using var g = Graphics.FromHwnd(Handle);
-                TextRenderer.DrawText(g, CueText, Font, ClientRectangle, Theme.TextDim,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            }
-        }
+            // The theme draws the watermark in the text color at half opacity.
+            if (e.NameScope.Find<TextBlock>("PART_Watermark") is not { } watermark) return;
+            watermark.Opacity = 1;
+            watermark.Bind(TextBlock.ForegroundProperty, watermark.GetResourceObservable("TextControlPlaceholderForeground"));
+        };
+        box.GotFocus += (_, _) => box.Watermark = null;
+        box.LostFocus += (_, _) => box.Watermark = cue;
+        return box;
     }
 }

@@ -1,113 +1,69 @@
 namespace RpgLauncher;
 
 /// <summary>Dialog for how the launcher reaches DLsite: network adapter and optional SOCKS/HTTP proxy.</summary>
-internal sealed class ProxyDialog : Form
+internal sealed class ProxyDialog : DialogWindow
 {
-    private readonly Font _captionFont = Theme.Font(7.8f, FontStyle.Bold);
-    private readonly Font _inputFont = Theme.Font(10f);
-    private readonly Font _checkFont = Theme.Font(9.2f);
-    private readonly Font _resultFont = Theme.Font(9f, FontStyle.Bold);
-    private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 400 };
+    private readonly UiFont _captionFont = Look.Font(7.8, bold: true);
+    private readonly UiFont _inputFont = Look.Font(10);
+    private readonly UiFont _checkFont = Look.Font(9.2);
+    private readonly UiFont _resultFont = Look.Font(9, bold: true);
 
-    private sealed record AdapterChoice(string? Value, string Label)
-    {
-        public override string ToString() => Label;
-    }
+    private sealed record AdapterChoice(string? Value, string Label);
 
-    private readonly Label _adapterCaption, _proxyCaption;
-    private readonly ComboBox _adapter;
+    private readonly TextBlock _adapterCaption, _proxyCaption;
+    private readonly DarkComboBox _adapter;
+    private readonly List<AdapterChoice> _choices;
     private readonly TextBox _address, _user, _password;
-    private readonly CheckBox _redownload;
-    private readonly Label _result;
+    private readonly DarkCheckBox _redownload;
+    private readonly TextBlock _result;
     private readonly PillButton _test, _save, _cancel;
     private readonly string _originalAddress;
     private readonly string? _originalAdapter;
     private CancellationTokenSource? _testCts;
+    private bool _closed;
 
     public ProxySettings Settings => new()
     {
         Address = string.IsNullOrWhiteSpace(_address.Text) ? null : _address.Text.Trim(),
         Username = string.IsNullOrWhiteSpace(_user.Text) ? null : _user.Text.Trim(),
         Password = string.IsNullOrEmpty(_password.Text) ? null : _password.Text,
-        Adapter = (_adapter.SelectedItem as AdapterChoice)?.Value
+        Adapter = SelectedChoice?.Value
     };
 
     /// <summary>True when the user wants the cached release calendar fetched again.</summary>
     public bool RedownloadReleases => _redownload.Checked;
 
+    private AdapterChoice? SelectedChoice => _adapter.SelectedIndex >= 0 ? _choices[_adapter.SelectedIndex] : null;
+
     public ProxyDialog(ProxySettings? current)
     {
-        Text = "DLsite connection";
-        BackColor = Theme.Bg;
-        ForeColor = Theme.Text;
-        Font = Theme.Font(9f);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        StartPosition = FormStartPosition.CenterParent;
-        MaximizeBox = false;
-        MinimizeBox = false;
-        ShowInTaskbar = false;
-        ShowIcon = false;
-        AutoScaleMode = AutoScaleMode.None;
-        KeyPreview = true;
+        Title = "DLsite connection";
 
         _originalAddress = current?.Address?.Trim() ?? "";
         _originalAdapter = current?.Adapter;
 
-        Label Caption(string text) => new()
-        {
-            Text = text,
-            Font = _captionFont,
-            ForeColor = Theme.TextDim,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        TextBlock Caption(string text) => Ui.Label(text, _captionFont, Look.TextDim);
 
-        TextBox Input(string? value, string placeholder, bool secret = false) => new()
+        TextBox Input(string? value, string placeholder, bool secret = false)
         {
-            Text = value ?? "",
-            PlaceholderText = placeholder,
-            Font = _inputFont,
-            BackColor = Theme.Field,
-            ForeColor = Theme.Text,
-            BorderStyle = BorderStyle.FixedSingle,
-            UseSystemPasswordChar = secret
-        };
+            var box = Ui.TextBox(_inputFont, value ?? "");
+            box.Watermark = placeholder;
+            if (secret) box.PasswordChar = '\u25cf';
+            return box;
+        }
 
         _adapterCaption = Caption("NETWORK ADAPTER");
-        _adapter = new ComboBox
+        _adapter = new DarkComboBox { Font = _inputFont };
+        _choices = new List<AdapterChoice>
         {
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            FlatStyle = FlatStyle.Flat,
-            Font = _inputFont,
-            BackColor = Theme.Field,
-            ForeColor = Theme.Text,
-            // Drawn by hand: the stock list ignores BackColor and shows white.
-            DrawMode = DrawMode.OwnerDrawFixed
-        };
-        _adapter.DrawItem += (_, e) =>
-        {
-            // The closed box (ComboBoxEdit) shouldn't show the hover highlight.
-            bool selected = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
-            using (var back = new SolidBrush(selected ? Theme.FieldHover : Theme.Field))
-                e.Graphics.FillRectangle(back, e.Bounds);
-            if (e.Index >= 0)
-            {
-                TextRenderer.DrawText(e.Graphics, _adapter.Items[e.Index]?.ToString() ?? "", _inputFont,
-                    Rectangle.Inflate(e.Bounds, -4, 0), selected ? Theme.Text : Theme.TextMuted,
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            }
-        };
-        var choices = new List<AdapterChoice>
-        {
-            new(null, "Automatic (Windows decides)"),
+            new(null, OperatingSystem.IsWindows() ? "Automatic (Windows decides)" : "Automatic (the system decides)"),
             new(DlsiteConnection.AnyVpnAdapter, "Any connected VPN adapter")
         };
-        choices.AddRange(DlsiteConnection.AdapterChoices().Select(c => new AdapterChoice(c.Value, c.Label)));
-        if (_originalAdapter is { } saved && choices.All(c => c.Value != saved))
-            choices.Add(new AdapterChoice(saved, saved + "  \u00b7  not connected"));
-        _adapter.Items.AddRange(choices.ToArray());
-        _adapter.SelectedItem = choices.First(c => c.Value == _originalAdapter);
+        _choices.AddRange(DlsiteConnection.AdapterChoices().Select(c => new AdapterChoice(c.Value, c.Label)));
+        if (_originalAdapter is { } saved && _choices.All(c => c.Value != saved))
+            _choices.Add(new AdapterChoice(saved, saved + "  \u00b7  not connected"));
+        _adapter.SetItems(_choices.Select(c => c.Label));
+        _adapter.SelectedIndex = _choices.FindIndex(c => c.Value == _originalAdapter);
 
         _proxyCaption = Caption("PROXY (OPTIONAL)");
         _address = Input(current?.Address, "socks5://host:port  or  http://host:port");
@@ -115,171 +71,167 @@ internal sealed class ProxyDialog : Form
         _password = Input(current?.Password, "Password", secret: true);
 
         // Explanations go in tooltips, not on the dialog.
-        _tips.SetToolTip(_adapter,
+        Ui.Tip(_adapter,
             "Send DLsite requests (new releases, covers, metadata) out through this adapter, e.g. your VPN.\n" +
             "Useful when the VPN's split tunneling doesn't catch the launcher.\n" +
             "If the adapter is disconnected, requests fail instead of using your normal connection.");
-        _tips.SetToolTip(_address, "socks5://, socks4:// or http:// with a port. Leave empty for no proxy.");
-        _tips.SetToolTip(_password, "Saved encrypted for your Windows account.");
+        Ui.Tip(_address, "socks5://, socks4:// or http:// with a port. Leave empty for no proxy.");
+        Ui.Tip(_password, OperatingSystem.IsWindows()
+            ? "Saved encrypted for your Windows account."
+            : "Saved encrypted with a key only your user account can read.");
 
-        _redownload = new CheckBox
-        {
-            Text = "Re-download new releases through this connection",
-            Font = _checkFont,
-            ForeColor = Theme.TextMuted,
-            BackColor = Color.Transparent,
-            AutoSize = false
-        };
+        _redownload = new DarkCheckBox("Re-download new releases through this connection") { Font = _checkFont };
         void ConnectionChanged() => _redownload.Checked =
-            !string.Equals(_address.Text.Trim(), _originalAddress, StringComparison.OrdinalIgnoreCase) ||
-            (_adapter.SelectedItem as AdapterChoice)?.Value != _originalAdapter;
+            !string.Equals((_address.Text ?? "").Trim(), _originalAddress, StringComparison.OrdinalIgnoreCase) ||
+            SelectedChoice?.Value != _originalAdapter;
         _address.TextChanged += (_, _) => ConnectionChanged();
         _adapter.SelectedIndexChanged += (_, _) => ConnectionChanged();
 
-        _result = new Label
-        {
-            Font = _resultFont,
-            ForeColor = Theme.TextMuted,
-            BackColor = Color.Transparent,
-            AutoSize = false,
-            AutoEllipsis = true,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        _result = Ui.Label("", _resultFont, Look.TextMuted);
 
         _test = new PillButton { Text = "Test" };
         _save = new PillButton { Text = "Save", Checked = true };
         _cancel = new PillButton { Text = "Cancel" };
-        _tips.SetToolTip(_test, "Shows which country DLsite sees with these settings");
+        Ui.Tip(_test, "Shows which country DLsite sees with these settings");
         _test.Click += async (_, _) => await TestAsync();
         _save.Click += (_, _) => TrySave();
-        _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+        _cancel.Click += (_, _) => Cancel();
 
-        Controls.AddRange(new Control[]
+        var backdrop = new Backdrop(PaintBackdrop);
+        Body.Children.AddRange(new Control[]
         {
-            _adapterCaption, _adapter, _proxyCaption, _address, _user, _password,
+            backdrop, _adapterCaption, _adapter, _proxyCaption, _address, _user, _password,
             _redownload, _result, _test, _save, _cancel
         });
 
-        KeyDown += (_, e) =>
+        SetClientSize(480, LayoutDialog());
+        Body.Layout = size =>
         {
-            if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); }
-            else if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; TrySave(); }
+            Body.Place(backdrop, 0, 0, size.Width, size.Height);
+            LayoutDialog();
         };
+    }
+
+    /// <summary>Places the controls; returns the height they need.</summary>
+    private double LayoutDialog()
+    {
+        double pad = 22, width = 480, inner = width - pad * 2;
+        double inputH = Ui.TextBoxHeight(_inputFont);
+        double captionH = 18, afterCaption = 4, sectionGap = 16, rowGap = 8;
+
+        double y = pad;
+        Body.Place(_adapterCaption, pad, y, inner, captionH);
+        y += captionH + afterCaption;
+        Body.Place(_adapter, pad, y, inner, inputH);
+        y += inputH + sectionGap;
+
+        Body.Place(_proxyCaption, pad, y, inner, captionH);
+        y += captionH + afterCaption;
+        Body.Place(_address, pad, y, inner, inputH);
+        y += inputH + rowGap;
+        double half = Math.Floor((inner - rowGap) / 2);
+        Body.Place(_user, pad, y, half, inputH);
+        Body.Place(_password, pad + half + rowGap, y, inner - half - rowGap, inputH);
+        y += inputH + sectionGap;
+
+        Body.Place(_redownload, pad, y, inner, 24);
+        y += 24 + 6;
+        Body.Place(_result, pad, y, inner, 22);
+
+        double buttonH = 36, buttonW = 96;
+        double buttonsY = y + 22 + 12;
+        Body.Place(_test, pad, buttonsY, buttonW, buttonH);
+        Body.Place(_save, width - pad - buttonW, buttonsY, buttonW, buttonH);
+        Body.Place(_cancel, width - pad - buttonW - rowGap - buttonW, buttonsY, buttonW, buttonH);
+        return buttonsY + buttonH + pad;
     }
 
     private void ShowResult(string text, Color color)
     {
         _result.Text = text;
-        _result.ForeColor = color;
+        _result.Foreground = Look.Brush(color);
+        // The whole message as a tooltip when it is cut off, as the WinForms label's AutoEllipsis did.
+        bool trimmed = Look.Measure(text, _resultFont).Width > Body.PlaceOf(_result).Width;
+        _result.IsHitTestVisible = trimmed;
+        _result.Background = trimmed ? Brushes.Transparent : null;
+        Ui.Tip(_result, trimmed ? text : null);
     }
 
     private void TrySave()
     {
         if (!DlsiteConnection.TryCreateProxy(Settings, out _, out var error))
         {
-            ShowResult(error ?? "That proxy address can't be used.", Theme.Gold);
+            ShowResult(error ?? "That proxy address can't be used.", Look.Gold);
             _address.Focus();
             return;
         }
-        DialogResult = DialogResult.OK;
-        Close();
+        Accept();
     }
 
     private async Task TestAsync()
     {
         _testCts?.Cancel();
         var cts = _testCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        _test.Enabled = false;
-        ShowResult("Connecting\u2026", Theme.TextMuted);
+        _test.IsEnabled = false;
+        ShowResult("Connecting\u2026", Look.TextMuted);
         try
         {
             string where = await DlsiteConnection.TestAsync(Settings, cts.Token);
-            if (!IsDisposed) ShowResult("✓ " + where, Theme.Success);
+            if (!_closed) ShowResult("✓ " + where, Look.Success);
         }
         catch (Exception ex)
         {
-            if (IsDisposed) return;
+            if (_closed) return;
             string message = ex is TaskCanceledException or OperationCanceledException
                 ? "No answer within 20 seconds"
                 : (ex.InnerException?.Message ?? ex.Message);
-            ShowResult("✗ " + message, Theme.Gold);
+            ShowResult("✗ " + message, Look.Gold);
         }
         finally
         {
-            if (!IsDisposed) _test.Enabled = true;
+            if (!_closed) _test.IsEnabled = true;
         }
     }
 
-    protected override void OnHandleCreated(EventArgs e)
+    protected override void OnKeyDown(KeyEventArgs e)
     {
-        base.OnHandleCreated(e);
-        try { NativeMethods.ApplyDarkTitleBar(Handle); } catch { }
-    }
-
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        float scale = Theme.Scale(this);
-        int R(float value) => (int)Math.Round(value * scale);
-
-        int pad = R(22f), width = R(480f), inner = width - pad * 2;
-        int inputH = _address.PreferredHeight;
-        int captionH = R(18f), afterCaption = R(4f), sectionGap = R(16f), rowGap = R(8f);
-
-        int y = pad;
-        _adapterCaption.SetBounds(pad, y, inner, captionH);
-        y += captionH + afterCaption;
-        _adapter.ItemHeight = Math.Max(_adapter.ItemHeight, inputH - R(6f));
-        _adapter.SetBounds(pad, y, inner, inputH);
-        y = _adapter.Bottom + sectionGap;
-
-        _proxyCaption.SetBounds(pad, y, inner, captionH);
-        y += captionH + afterCaption;
-        _address.SetBounds(pad, y, inner, inputH);
-        y = _address.Bottom + rowGap;
-        int half = (inner - rowGap) / 2;
-        _user.SetBounds(pad, y, half, inputH);
-        _password.SetBounds(pad + half + rowGap, y, inner - half - rowGap, inputH);
-        y = _user.Bottom + sectionGap;
-
-        _redownload.SetBounds(pad, y, inner, R(24f));
-        y = _redownload.Bottom + R(6f);
-        _result.SetBounds(pad, y, inner, R(22f));
-
-        int buttonH = R(36f), buttonW = R(96f);
-        int buttonsY = _result.Bottom + R(12f);
-        ClientSize = new Size(width, buttonsY + buttonH + pad);
-        _test.Bounds = new Rectangle(pad, buttonsY, buttonW, buttonH);
-        _save.Bounds = new Rectangle(width - pad - buttonW, buttonsY, buttonW, buttonH);
-        _cancel.Bounds = new Rectangle(_save.Left - rowGap - buttonW, buttonsY, buttonW, buttonH);
-        CenterToParent();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        // Blob style: a blob sits between Test and Cancel.
-        Mascots.DrawCentered(e.Graphics, MascotSpot.ConnectionDialog, (_test.Right + _cancel.Left) / 2f,
-            ClientSize.Height, 52f * Theme.Scale(this));
-    }
-
-    protected override void OnFormClosed(FormClosedEventArgs e)
-    {
-        _testCts?.Cancel();
-        base.OnFormClosed(e);
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
+        base.OnKeyDown(e);
+        if (e.Key == Key.Escape)
         {
-            _captionFont.Dispose();
-            _inputFont.Dispose();
-            _checkFont.Dispose();
-            _resultFont.Dispose();
-            _tips.Dispose();
-            _testCts?.Dispose();
+            e.Handled = true;
+            Cancel();
         }
-        base.Dispose(disposing);
+        else if (e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            TrySave();
+        }
+    }
+
+    // Blob style: a blob sits between Test and Cancel.
+    private void PaintBackdrop(DrawingContext g, Size size) =>
+        Mascots.DrawCentered(g, MascotSpot.ConnectionDialog, (Body.PlaceOf(_test).Right + Body.PlaceOf(_cancel).Left) / 2,
+            size.Height, 52);
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _closed = true;
+        _testCts?.Cancel();
+        _testCts?.Dispose();
+        base.OnClosed(e);
+    }
+
+    /// <summary>Paints under the dialog's controls, as the form's OnPaint did.</summary>
+    private sealed class Backdrop : Control
+    {
+        private readonly Action<DrawingContext, Size> _paint;
+
+        public Backdrop(Action<DrawingContext, Size> paint)
+        {
+            _paint = paint;
+            IsHitTestVisible = false;
+        }
+
+        public override void Render(DrawingContext g) => _paint(g, Bounds.Size);
     }
 }
