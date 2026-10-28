@@ -177,7 +177,8 @@ internal static class DlsiteConnection
     {
         return async (context, token) =>
         {
-            var nic = FindAdapter(adapter, out var error) ?? throw new HttpRequestException(error);
+            var nic = FindAdapter(adapter, out var error) ??
+                      throw new AdapterUnavailableException(adapter == AnyVpnAdapter ? null : adapter, error!);
             var local = IPv4Of(nic) ?? throw new HttpRequestException($"The adapter \u201c{nic.Name}\u201d has no address.");
 
             var host = context.DnsEndPoint.Host;
@@ -219,14 +220,19 @@ internal static class DlsiteConnection
     }
 
     /// <summary>Applies settings to every DLsite request; false with an error when the proxy is unusable.</summary>
+    /// <summary>Address of the proxy DLsite requests currently go through, or null.</summary>
+    public static Uri? ActiveProxy { get; private set; }
+
     public static bool Apply(ProxySettings? settings, out string? error)
     {
+        ActiveProxy = null;
         if (!TryCreateProxy(settings, out var proxy, out error))
         {
             MetadataService.UseConnection(null, settings?.Adapter);
             return false;
         }
         MetadataService.UseConnection(proxy, settings?.Adapter);
+        ActiveProxy = (proxy as WebProxy)?.Address;
         return true;
     }
 

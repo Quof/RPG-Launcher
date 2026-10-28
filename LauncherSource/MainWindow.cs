@@ -81,7 +81,7 @@ internal sealed class MainWindow : Window
     private readonly TagFilter _releaseTagFilter = new();
     private int _releaseProgress;
     private int _releaseTotal;
-    private string? _releaseError;
+    private DlsiteProblem? _releaseError;
     private CancellationTokenSource? _releaseCts;
     private HashSet<string> _ownedProductIds = new(StringComparer.OrdinalIgnoreCase);
 
@@ -425,12 +425,12 @@ internal sealed class MainWindow : Window
         _releases.EmptyTitle = _releasesFetching
             ? "Checking DLsite for new games\u2026"
             : _releaseError is not null
-                ? "Couldn't reach DLsite"
+                ? "Couldn't reach DLsite: " + _releaseError.Reason
                 : _search.TextValue.Trim().Length > 0 || !_releaseTagFilter.IsEmpty
                     ? "No new releases match your search or tag"
                     : "No new releases found";
         _releases.EmptyText = _releaseError is not null && !_releasesFetching
-            ? "Check your connection, then press refresh (F5) to try again."
+            ? _releaseError!.Fix + ", then press F5 to try again."
             : "";
         _releases.Loading = _releasesFetching;
         _releases.SetDays(_releaseStore.Days());
@@ -486,7 +486,7 @@ internal sealed class MainWindow : Window
                 }
                 catch (Exception ex)
                 {
-                    _releaseError = ex.Message;
+                    _releaseError = DlsiteErrors.Describe(ex);
                     Diagnostics.Log($"Release day {date:yyyy-MM-dd} failed: {ex.Message}");
                     // Offline or blocked: stop instead of waiting on every remaining day.
                     if (++consecutiveFailures >= 2) break;
@@ -515,7 +515,7 @@ internal sealed class MainWindow : Window
 
         ShowReleaseDays();
         if (_releaseError is not null && _releases.TotalCount > 0)
-            SetStatus("Couldn't load every day from DLsite \u00b7 showing what is cached \u00b7 F5 to try again");
+            SetStatus($"Couldn't load new releases: {_releaseError.Reason} \u00b7 {_releaseError.Fix}, then press F5");
         else if (!_statusTimer.IsEnabled)
             ResetStatus();
     }
@@ -527,7 +527,7 @@ internal sealed class MainWindow : Window
 
         int total = _releases.TotalCount;
         if (total == 0)
-            return _releaseError is not null ? "Couldn't reach DLsite \u00b7 " + _releaseError : "No new releases loaded";
+            return _releaseError is not null ? "Couldn't reach DLsite: " + _releaseError.Status : "No new releases loaded";
 
         var days = _releaseStore.Days();
         var lastChecked = days.Count == 0 ? (DateTime?)null : days.Max(d => d.FetchedUtc).ToLocalTime();
@@ -936,6 +936,7 @@ internal sealed class MainWindow : Window
         int translated = 0;
         int translationMissed = 0;
         int translationFailed = 0;
+        string? lastError = null;
         // Offline or blocked: stop after a few failures in a row instead of trying every game.
         const int MaxFailuresInARow = 3;
         int failuresInARow = 0;
@@ -968,6 +969,7 @@ internal sealed class MainWindow : Window
                 {
                     failed++;
                     failuresInARow++;
+                    lastError = result.Error;
                 }
 
                 if (i < pending.Count - 1 || translations.Count > 0)
@@ -1002,6 +1004,7 @@ internal sealed class MainWindow : Window
                 {
                     translationFailed++;
                     failuresInARow++;
+                    lastError = result.Error;
                 }
 
                 if (i < translations.Count - 1 || englishTitles.Count > 0)
@@ -1071,7 +1074,7 @@ internal sealed class MainWindow : Window
         }
         else if (translationFailed > 0)
         {
-            SetStatus($"English store lookup failed for {translationFailed} game{(translationFailed == 1 ? "" : "s")} \u00b7 will retry next launch");
+            SetStatus($"English store lookup failed for {translationFailed} game{(translationFailed == 1 ? "" : "s")}: {lastError ?? "unknown error"}");
         }
         else if (missed > 0)
         {
@@ -1079,7 +1082,7 @@ internal sealed class MainWindow : Window
         }
         else if (failed > 0)
         {
-            SetStatus($"Metadata lookup failed for {failed} game{(failed == 1 ? "" : "s")} \u00b7 will retry next launch");
+            SetStatus($"Metadata lookup failed for {failed} game{(failed == 1 ? "" : "s")}: {lastError ?? "unknown error"}");
         }
         else if (translationMissed > 0)
         {

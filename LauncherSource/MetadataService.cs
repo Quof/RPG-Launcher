@@ -164,7 +164,7 @@ internal static class MetadataService
         }
         catch (Exception ex)
         {
-            return MetadataLookupResult.Fail(ex.Message);
+            return MetadataLookupResult.Fail(DlsiteErrors.Describe(ex).Status);
         }
     }
 
@@ -200,7 +200,7 @@ internal static class MetadataService
         }
         catch (Exception ex)
         {
-            return MetadataLookupResult.Fail(ex.Message);
+            return MetadataLookupResult.Fail(DlsiteErrors.Describe(ex).Status);
         }
     }
 
@@ -323,7 +323,7 @@ internal static class MetadataService
         }
         catch (Exception ex)
         {
-            return MetadataLookupResult.Fail(ex.Message);
+            return MetadataLookupResult.Fail(DlsiteErrors.Describe(ex).Status);
         }
     }
 

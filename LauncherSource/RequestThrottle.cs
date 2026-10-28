@@ -27,7 +27,7 @@ internal sealed class RequestThrottle : DelegatingHandler
         {
             var now = DateTime.UtcNow;
             if (PausedUntil.TryGetValue(host, out var until) && until > now)
-                throw new HttpRequestException($"{host} asked the launcher to slow down; trying again after {until.ToLocalTime():HH:mm}.");
+                throw new ThrottledException(host, until);
 
             var start = NextSlot.TryGetValue(host, out var slot) && slot > now ? slot : now;
             // Images come from a CDN and are small; pages and the API get a full second.
