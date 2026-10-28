@@ -241,20 +241,26 @@ internal sealed class ImageFraming
     }
 }
 
-/// <summary>Supported engines, grouped as the engine filter lists them.</summary>
+/// <summary>Supported engines, grouped as the engine filter lists them. The filter is saved by name.</summary>
 internal enum EngineFamily
 {
     MvMz,
     Vx,
     Xp,
     Rm2k,
-    Wolf
+    Wolf,
+    RenPy,
+    Tyrano,
+    Unity
 }
 
 internal static class EngineFamilies
 {
     public static readonly EngineFamily[] All =
-        { EngineFamily.MvMz, EngineFamily.Vx, EngineFamily.Xp, EngineFamily.Rm2k, EngineFamily.Wolf };
+    {
+        EngineFamily.MvMz, EngineFamily.Vx, EngineFamily.Xp, EngineFamily.Rm2k, EngineFamily.Wolf, EngineFamily.RenPy,
+        EngineFamily.Tyrano, EngineFamily.Unity
+    };
 
     public static string Label(EngineFamily family) => family switch
     {
@@ -262,12 +268,21 @@ internal static class EngineFamilies
         EngineFamily.Xp => "RPG Maker XP",
         EngineFamily.Rm2k => "RPG Maker 2000/2003",
         EngineFamily.Wolf => "Wolf RPG Editor",
+        EngineFamily.RenPy => "Ren'Py",
+        EngineFamily.Tyrano => "TyranoBuilder / TyranoScript",
+        EngineFamily.Unity => "Unity",
         _ => "RPG Maker MV / MZ"
     };
 
+    /// <summary>RPG Maker engines with a test play mode (noclip and a debug menu): VX Ace, VX, XP and 2000/2003.</summary>
+    public static bool HasTestMode(EngineFamily family) => family is EngineFamily.Vx or EngineFamily.Xp or EngineFamily.Rm2k;
+
     /// <summary>The family of an engine name such as "RPG Maker VX Ace" (see GameScanner).</summary>
     public static EngineFamily Of(string engine) =>
-        engine.Contains("Wolf", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Wolf
+        engine.Contains("Ren'Py", StringComparison.OrdinalIgnoreCase) ? EngineFamily.RenPy
+        : engine.Contains("Tyrano", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Tyrano
+        : engine.Contains("Unity", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Unity
+        : engine.Contains("Wolf", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Wolf
         : engine.Contains("2000", StringComparison.Ordinal) || engine.Contains("2003", StringComparison.Ordinal) ? EngineFamily.Rm2k
         : engine.Contains("VX", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Vx
         : engine.Contains("XP", StringComparison.OrdinalIgnoreCase) ? EngineFamily.Xp

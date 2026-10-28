@@ -12,10 +12,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>RPG Launcher</Product>
     <AssemblyTitle>RPG Launcher</AssemblyTitle>
-    <Description>Cover-flow launcher for RPG Maker and Wolf RPG Editor games</Description>
-    <Version>1.0.0</Version>
-    <FileVersion>1.0.0.0</FileVersion>
-    <InformationalVersion>1.0.0</InformationalVersion>
+    <Description>Cover-flow launcher for RPG Maker, Wolf RPG Editor, Ren'Py, TyranoBuilder and Unity games</Description>
+    <Version>0.7.0</Version>
+    <FileVersion>0.7.0.0</FileVersion>
+    <InformationalVersion>0.7.0</InformationalVersion>
     <DebugType>none</DebugType>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

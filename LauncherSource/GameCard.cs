@@ -241,7 +241,7 @@ internal sealed class GameCard
         menu.Items.Add(play);
         if (Game.Family == EngineFamily.MvMz)
             menu.Items.Add(Menus.Item(Game.CheatsOn ? "Show Cheats" : "Play with Cheats", (_, _) => CheatsRequested?.Invoke(Game)));
-        else if (Game.Family != EngineFamily.Wolf)
+        else if (EngineFamilies.HasTestMode(Game.Family))
             menu.Items.Add(Menus.Item("Play in Test Mode", (_, _) => CheatsRequested?.Invoke(Game)));
 
         menu.Items.Add(Menus.Item("Open game folder", (_, _) => OpenFolderRequested?.Invoke(Game)));
@@ -426,7 +426,7 @@ internal sealed class GameCard
             }
             else
             {
-                string initial = string.IsNullOrWhiteSpace(Game.CardTitle) ? "?" : Game.CardTitle[..1].ToUpperInvariant();
+                string initial = GameImageLoader.InitialOf(Game.CardTitle);
                 g.FillRectangle(Look.Gradient(Look.PlaceholderTop, Look.PlaceholderBottom, 45), rect);
                 Look.DrawText(g, initial, InitialFont, Look.Alpha(150, Look.Gold), rect);
             }

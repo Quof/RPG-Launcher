@@ -301,7 +301,7 @@ internal sealed class GameGrid : Control, ICustomHitTest
         string title = filtered ? "No games match your filters" : "No games found";
         string text = filtered
             ? "Try a different search, tag or group, or turn off the Favorites filter."
-            : "Place your RPG Maker MV / MZ game folders in this directory, then press Rescan.";
+            : "Place your game folders in this directory (or add a folder from ⋯), then press Rescan.";
 
         var titleRect = new Rect(centerX - cardW / 2, centerY, cardW, 30);
         Look.DrawText(g, title, _emptyTitleFont, Look.Text, titleRect, TextAlignment.Center);

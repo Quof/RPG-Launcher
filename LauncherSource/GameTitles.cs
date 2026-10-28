@@ -102,7 +102,8 @@ internal static class GameTitles
     };
 
     private static readonly Regex GenericRegex = new(
-        @"^(?:project|game|ゲーム|あたらしいゲーム|新しいゲーム|rpg|rpgmaker(?:mv|mz)?|untitled|newgame|test|sample|contents?|contens|本体|data|www|main|app)\d*$",
+        @"^(?:project|game|ゲーム|あたらしいゲーム|新しいゲーム|rpg|rpgmaker(?:mv|mz)?|untitled|newgame|test|sample|contents?|contens|本体|data|www|main|app|" +
+        @"tyrano|tyranoscript|tyranobuilder|ティラノスクリプト|ティラノビルダー|myproject|newunityproject|nw|nwjs|electron)\d*$",
         Options);
 
     /// <summary>The title without version numbers, edition notes or key-binding lists.</summary>

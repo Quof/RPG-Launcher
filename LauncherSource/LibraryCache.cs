@@ -7,8 +7,8 @@ namespace RpgLauncher;
 /// <summary>Caches the last folder scan (launcher-library.json) so startup can skip rescanning.</summary>
 internal static class LibraryCache
 {
-    // 2: adds RPG Maker XP, VX, VX Ace, 2000/2003 and Wolf RPG Editor games.
-    private const int CurrentVersion = 2;
+    // 2: adds RPG Maker XP, VX, VX Ace, 2000/2003 and Wolf RPG Editor games. 3: adds Ren'Py, TyranoScript and Unity games.
+    private const int CurrentVersion = 3;
 
     private static readonly JsonSerializerOptions Options = new()
     {

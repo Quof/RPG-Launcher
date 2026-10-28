@@ -120,10 +120,15 @@ internal static class GameImageLoader
     /// <summary>True when the game has an icon of its own rather than RPG Maker's default one.</summary>
     private static bool HasOwnIcon(GameEntry game) => game.IconPath is not null && !StockTitles.IsStockIcon(game.IconPath);
 
-    private static string PlaceholderInitial(GameEntry game)
+    private static string PlaceholderInitial(GameEntry game) =>
+        InitialOf(string.IsNullOrWhiteSpace(game.CustomTitle) ? game.LocalName : game.CustomTitle!);
+
+    /// <summary>A name's first character, upper-cased: a whole one, even outside the BMP (emoji, rare kanji).</summary>
+    public static string InitialOf(string? name)
     {
-        string name = string.IsNullOrWhiteSpace(game.CustomTitle) ? game.LocalName : game.CustomTitle!;
-        return string.IsNullOrWhiteSpace(name) ? "?" : name[..1].ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(name)) return "?";
+        name = name.TrimStart();
+        return name[..System.Globalization.StringInfo.GetNextTextElementLength(name)].ToUpperInvariant();
     }
 
     private static SKBitmap? TryLoadCached(string path, bool full = false)
@@ -373,8 +378,11 @@ internal static class GameImageLoader
     {
         try
         {
-            // "…\Game.rgss3a::Graphics\Titles1\Title.png" is a picture inside an RPG Maker archive.
-            var bytes = path.Contains(RgssArchive.Separator) ? RgssArchive.ReadPath(path) : File.ReadAllBytes(path);
+            // "…\Game.rgss3a::Graphics\Titles1\Title.png" is a picture inside an RPG Maker archive,
+            // "…\Game.exe::data/bgimage/title.jpg" one inside an HTML game's package.
+            var bytes = path.Contains(RgssArchive.Separator)
+                ? RgssArchive.ReadPath(path) ?? AppArchive.ReadPath(path)
+                : File.ReadAllBytes(path);
             if (bytes is null) return null;
             if (Rm2kFiles.IsXyz(bytes)) return Rm2kFiles.DecodeXyz(bytes);
             bytes = DecryptIfNeeded(bytes, encryptionKey);

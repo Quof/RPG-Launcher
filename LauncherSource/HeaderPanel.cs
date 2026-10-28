@@ -9,6 +9,8 @@ internal sealed class HeaderPanel : ManualPanel, ICustomHitTest
     private static readonly UiFont SubtitleFont = Look.Font(8.2);
 
     private const double MascotHeight = 78;
+    // The header blob is cut off at its left, so it sits against the window's left edge, peeking in.
+    private const double MascotLeft = 0;
 
     private readonly Backdrop _backdrop;
     private string _subtitle = "";
@@ -35,7 +37,7 @@ internal sealed class HeaderPanel : ManualPanel, ICustomHitTest
     }
 
     /// <summary>Left edge of the logo text, after the mascot when one is shown.</summary>
-    private double LogoLeft => Mascot is null ? 28 : 16 + Mascots.WidthAt(Mascot, MascotHeight) + 12;
+    private double LogoLeft => Mascot is null ? 28 : MascotLeft + Mascots.WidthAt(Mascot, MascotHeight) + 12;
 
     public string Subtitle
     {
@@ -89,7 +91,7 @@ internal sealed class HeaderPanel : ManualPanel, ICustomHitTest
         }
 
         if (Mascot is not null)
-            Mascots.Draw(g, Mascot, 16, height - 1, MascotHeight);
+            Mascots.Draw(g, Mascot, MascotLeft, height - 1, MascotHeight);
 
         // On whole pixels, as WinForms placed them.
         double x = Math.Floor(LogoLeft), y = 20;

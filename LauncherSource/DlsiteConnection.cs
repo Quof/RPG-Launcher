@@ -16,7 +16,16 @@ internal sealed class ProxySettings
     [JsonIgnore] public string? Password { get; set; }
 
     // Saved encrypted, since the address can hold user:pass@ too. Plain values from older files are read as is.
-    [JsonPropertyName("address")] public string? SavedAddress { get => Secrets.Protect(Address); set => Address = Secrets.Unprotect(value); }
+    [JsonPropertyName("address")]
+    public string? SavedAddress
+    {
+        get => Secrets.Protect(Address);
+        set
+        {
+            Address = Secrets.Unprotect(value);
+            Unreadable = !string.IsNullOrEmpty(value) && Address is null;
+        }
+    }
     [JsonPropertyName("username")] public string? SavedUsername { get => Secrets.Protect(Username); set => Username = Secrets.Unprotect(value); }
     [JsonPropertyName("password")] public string? SavedPassword { get => Secrets.Protect(Password); set => Password = Secrets.Unprotect(value); }
 
@@ -25,6 +34,9 @@ internal sealed class ProxySettings
     /// <see cref="DlsiteConnection.AnyVpnAdapter"/>. Null lets the system choose.
     /// </summary>
     public string? Adapter { get; set; }
+
+    /// <summary>A proxy was saved, but on another PC or account, so it can't be decrypted here.</summary>
+    [JsonIgnore] public bool Unreadable { get; private set; }
 
     [JsonIgnore] public bool HasProxy => !string.IsNullOrWhiteSpace(Address);
     [JsonIgnore] public bool IsSet => HasProxy || !string.IsNullOrWhiteSpace(Adapter);
@@ -50,6 +62,11 @@ internal static class DlsiteConnection
     {
         proxy = null;
         error = null;
+        if (settings is { Unreadable: true, HasProxy: false })
+        {
+            error = "it was saved on another PC or account; enter it again in \u22ef \u2192 DLsite connection\u2026";
+            return false;
+        }
         if (settings is null || !settings.HasProxy) return true;
 
         string address = settings.Address!.Trim();

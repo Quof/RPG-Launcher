@@ -14,24 +14,22 @@ internal enum MascotSpot
     ReleasesLoading
 }
 
-/// <summary>Blob-style mascots. The header blob and each spot's blob are picked at random per launch.</summary>
+/// <summary>Blob-style mascots. The header always shows Yuuka; each spot's blob is picked at random per launch.</summary>
 internal static class Mascots
 {
-    private static readonly string[] Originals = { "blob-sleepy", "blob-alice", "blob-angel" };
     // Look: -1 faces the viewer's left, +1 the right.
     private static readonly (string Name, int Look)[] Family =
     {
         ("gen-mint", -1), ("gen-kuro", -1), ("gen-momo", -1), ("gen-sora", 1), ("gen-choco", -1)
     };
     private static readonly Dictionary<string, Bitmap?> Cache = new();
-    private static readonly int HeaderPick = Random.Shared.Next(Originals.Length);
     private static readonly int FamilyOffset = Random.Shared.Next(Family.Length);
 
     /// <summary>True when the current style shows blobs.</summary>
     public static bool Enabled => Look.Style == UiStyle.Blob;
 
-    /// <summary>The blob peeking over the header this session.</summary>
-    public static Bitmap? Header => Load(Originals[HeaderPick]);
+    /// <summary>The blob peeking over the header, beside the logo.</summary>
+    public static Bitmap? Header => Load("blob-yuuka");
 
     /// <summary>The sleepy blob, for empty screens.</summary>
     public static Bitmap? Empty => Load("blob-sleepy");

@@ -33,7 +33,7 @@ internal static class MetadataService
         "game", "rpg", "rpgmaker", "rpgmakermv", "rpgmakermz", "untitled", "newgame", "test", "sample"
     };
 
-    // Replaced, not disposed, when the connection changes, so requests in flight can finish.
+    // Replaced when the connection changes; the old one is disposed once requests in flight have finished or timed out.
     private static volatile HttpClient Http = CreateHttpClient(null);
 
     /// <summary>Shared DLsite client (same headers and timeouts) for other store features.</summary>
@@ -43,7 +43,12 @@ internal static class MetadataService
     /// Sends all DLsite requests through <paramref name="proxy"/> and/or out of network <paramref name="adapter"/>;
     /// null leaves it to Windows.
     /// </summary>
-    internal static void UseConnection(IWebProxy? proxy, string? adapter) => Http = CreateHttpClient(proxy, adapter);
+    internal static void UseConnection(IWebProxy? proxy, string? adapter)
+    {
+        var old = Http;
+        Http = CreateHttpClient(proxy, adapter);
+        _ = Task.Delay(TimeSpan.FromMinutes(2)).ContinueWith(_ => old.Dispose(), TaskScheduler.Default);
+    }
 
     private static readonly Regex ProductIdRegex = new(
         "data-list_item_product_id=\"(?<id>[A-Za-z]{2}\\d+)\"",
@@ -74,7 +79,11 @@ internal static class MetadataService
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Searches the store for each name in turn until one matches.</summary>
-    public static async Task<MetadataLookupResult> LookupAsync(IReadOnlyList<string> titles, CancellationToken token)
+    /// <param name="strict">
+    /// Short Latin titles match only exactly: for Ren'Py and Unity games, mostly western, whose short English titles
+    /// begin many unrelated store titles.
+    /// </param>
+    public static async Task<MetadataLookupResult> LookupAsync(IReadOnlyList<string> titles, CancellationToken token, bool strict = false)
     {
         MetadataLookupResult? failure = null;
         bool searched = false;
@@ -89,7 +98,7 @@ internal static class MetadataService
 
             if (searched) await Task.Delay(400, token).ConfigureAwait(false);
             searched = true;
-            var result = await LookupTitleAsync(query, token).ConfigureAwait(false);
+            var result = await LookupTitleAsync(query, strict, token).ConfigureAwait(false);
             if (result.Metadata is not null) return result;
             if (!result.NotFound) failure ??= result;
         }
@@ -98,7 +107,7 @@ internal static class MetadataService
         return failure ?? MetadataLookupResult.Miss();
     }
 
-    private static async Task<MetadataLookupResult> LookupTitleAsync(string query, CancellationToken token)
+    private static async Task<MetadataLookupResult> LookupTitleAsync(string query, bool strict, CancellationToken token)
     {
         try
         {
@@ -107,7 +116,7 @@ internal static class MetadataService
                 token.ThrowIfCancellationRequested();
 
                 var candidates = await SearchAsync(site, query, token).ConfigureAwait(false);
-                var best = PickBest(candidates, query);
+                var best = PickBest(candidates, query, strict);
 
                 // DLsite's search fails if one word differs (spelling, added brackets, censoring): try shorter
                 // pieces until one finds a work matching the whole title. Skipped for the rarely used all-ages site.
@@ -116,14 +125,14 @@ internal static class MetadataService
                     foreach (string part in ShortKeywords(query))
                     {
                         await Task.Delay(400, token).ConfigureAwait(false);
-                        best = PickBest(await SearchAsync(site, part, token).ConfigureAwait(false), query);
+                        best = PickBest(await SearchAsync(site, part, token).ConfigureAwait(false), query, strict);
                         if (best is not null) break;
                     }
                 }
 
                 // A name the game writes in Latin letters may be katakana in the store title (Sakura → サクラ):
                 // search that spelling and accept a single result containing every part of the game's title.
-                if (best is null && KatakanaSearch(query) is { } spelled)
+                if (best is null && !strict && KatakanaSearch(query) is { } spelled)
                 {
                     await Task.Delay(400, token).ConfigureAwait(false);
                     var found = await SearchAsync(site, spelled.Keyword, token).ConfigureAwait(false);
@@ -448,11 +457,12 @@ internal static class MetadataService
         return candidates;
     }
 
-    private static Candidate? PickBest(List<Candidate> candidates, string query)
+    private static Candidate? PickBest(List<Candidate> candidates, string query, bool strict = false)
     {
         string local = Normalize(query);
         Candidate? best = null;
         double bestScore = 0;
+        bool exactOnly = local.Length <= 3 || (strict && local.Length < 10 && local.All(char.IsAscii));
 
         foreach (var candidate in candidates)
         {
@@ -460,7 +470,7 @@ internal static class MetadataService
             if (other.Length == 0) continue;
 
             // Short titles only match exactly; many works merely contain them.
-            if (local.Length <= 3 && other != local) continue;
+            if (exactOnly && other != local) continue;
 
             // The store title is ours plus a number: a sequel.
             if (other.Length > local.Length && other.StartsWith(local, StringComparison.Ordinal) &&

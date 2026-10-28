@@ -9,7 +9,7 @@ namespace RpgLauncher;
 /// <summary>
 /// Live cheats for an MV or MZ game started with Play with Cheats: gold, walking speed, walking through walls, and each
 /// party member's level, EXP, HP, MP and parameters, plus healing. Values refresh while the game runs; a field being
-/// edited is kept.
+/// edited is kept. Advanced opens <see cref="AdvancedCheatWindow"/> for variables, switches, items, events and more.
 /// </summary>
 internal sealed class CheatWindow : Window
 {
@@ -17,11 +17,13 @@ internal sealed class CheatWindow : Window
     private static readonly string[] FieldNames = new[] { "Level", "EXP", "HP", "MP" }.Concat(MvCheats.ParamNames).ToArray();
     private static readonly double[] SpeedFactors = { 1, 1.5, 2, 3, 4 };
     private static readonly string[] SpeedNames = { "Normal speed", "1.5× speed", "2× speed", "3× speed", "4× speed" };
-    private static readonly TimeSpan ConnectWait = TimeSpan.FromSeconds(60);
+    // Under Wine a first start sets up the Wine prefix before the game loads; the script itself expires after 5 minutes.
+    private static readonly TimeSpan ConnectWait = TimeSpan.FromSeconds(OperatingSystem.IsWindows() ? 60 : 180);
 
     private const double Pad = 18, Gap = 10, Column = 104;
     private const double CaptionHeight = 18, AfterCaption = 3, SectionGap = 16;
 
+    private readonly string _gameTitle;
     private readonly int _port;
     private readonly string _secret;
     private readonly Action _connectAttemptsOver;
@@ -40,12 +42,13 @@ internal sealed class CheatWindow : Window
     private readonly DarkCheckBox _onTop, _noclip;
     private readonly TextBox _gold;
     private readonly DarkComboBox _member, _speed;
-    private readonly PillButton _setGold, _maxGold, _heal, _apply;
+    private readonly PillButton _setGold, _maxGold, _heal, _apply, _advanced;
     private readonly TextBlock[] _captions = new TextBlock[FieldCount];
     private readonly TextBox[] _fields = new TextBox[FieldCount];
 
     private CheatBridge? _bridge;
     private MvState? _state;
+    private AdvancedCheatWindow? _advancedWindow;
     private bool _everConnected, _gaveUp, _loading;
     // What each field last showed; a field whose text differs has been edited and is left alone by refreshes.
     private string _shownGold = "";
@@ -55,6 +58,7 @@ internal sealed class CheatWindow : Window
     /// <param name="connectAttemptsOver">Called once, when the game connects or stops being waited for.</param>
     public CheatWindow(string gameTitle, int port, string secret, WindowIcon? icon, Action connectAttemptsOver)
     {
+        _gameTitle = gameTitle;
         _port = port;
         _secret = secret;
         _connectAttemptsOver = connectAttemptsOver;
@@ -86,7 +90,11 @@ internal sealed class CheatWindow : Window
 
         _status = Ui.Label("", _statusFont, Look.TextMuted);
         _onTop = new DarkCheckBox("Keep on top") { Font = _checkFont, Checked = true };
-        _onTop.CheckedChanged += (_, _) => Topmost = _onTop.Checked;
+        _onTop.CheckedChanged += (_, _) =>
+        {
+            Topmost = _onTop.Checked;
+            if (_advancedWindow is not null) _advancedWindow.Topmost = _onTop.Checked;
+        };
 
         _goldCaption = Caption("GOLD");
         _gold = Number();
@@ -148,10 +156,14 @@ internal sealed class CheatWindow : Window
         _apply.Click += async (_, _) => await ApplyAsync();
         Ui.Tip(_apply, "Applies the values you changed to the selected party member");
 
+        _advanced = new PillButton { Text = "Advanced…", IsEnabled = false };
+        _advanced.Click += (_, _) => ShowAdvanced();
+        Ui.Tip(_advanced, "Variables, switches, items, common and map events, the game's save and load screens, and a script console");
+
         _body.Children.AddRange(new Control[]
         {
             _status, _onTop, _goldCaption, _gold, _setGold, _maxGold, _movementCaption, _speed, _noclip,
-            _partyCaption, _member, _heal, _apply
+            _partyCaption, _member, _heal, _apply, _advanced
         });
         _body.Children.AddRange(_captions);
         _body.Children.AddRange(_fields);
@@ -212,6 +224,7 @@ internal sealed class CheatWindow : Window
         y = bottom + 12;
 
         const double buttonW = 96, buttonH = 34;
+        _body.Place(_advanced, Pad, y, 112, buttonH);
         _body.Place(_apply, width - Pad - buttonW, y, buttonW, buttonH);
         return y + buttonH;
     }
@@ -225,6 +238,22 @@ internal sealed class CheatWindow : Window
         var area = screen.WorkingArea;
         double scale = screen.Scaling;
         Position = new PixelPoint(area.Right - (int)Math.Round((Width + 24) * scale), area.Y + (int)Math.Round(80 * scale));
+    }
+
+    /// <summary>Opens the Advanced window beside this one, or brings it forward.</summary>
+    private void ShowAdvanced()
+    {
+        if (_advancedWindow is { } open)
+        {
+            if (open.WindowState == Avalonia.Controls.WindowState.Minimized) open.WindowState = Avalonia.Controls.WindowState.Normal;
+            open.Activate();
+            return;
+        }
+        var window = new AdvancedCheatWindow(_gameTitle, _port, _secret, Icon) { Topmost = Topmost };
+        window.Closed += (_, _) => { if (_advancedWindow == window) _advancedWindow = null; };
+        _advancedWindow = window;
+        window.PlaceBeside(this);
+        window.Show(this);
     }
 
     private MvActor? SelectedActor =>
@@ -259,10 +288,12 @@ internal sealed class CheatWindow : Window
                     {
                         ShowStatus("✗ Lost the connection. Start the game again with Play with Cheats.", Look.Gold);
                         SetEditable(false);
+                        _advanced.IsEnabled = false;
                     }
                     return;
                 }
                 _bridge = bridge;
+                _advanced.IsEnabled = true;
                 if (!_everConnected)
                 {
                     _everConnected = true;
@@ -393,6 +424,7 @@ internal sealed class CheatWindow : Window
         if (_cts.IsCancellationRequested) return;
         ShowStatus("✗ Lost the connection. Start the game again with Play with Cheats.", Look.Gold);
         SetEditable(false);
+        _advanced.IsEnabled = false;
     }
 
     // A script that failed in the game, or an answer that isn't the expected JSON; the connection is fine.
@@ -510,6 +542,7 @@ internal sealed class CheatWindow : Window
         _cts.Cancel();
         _bridge?.Dispose();
         _bridge = null;
+        _advancedWindow?.Close();
         base.OnClosed(e);
     }
 }

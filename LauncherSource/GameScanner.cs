@@ -28,6 +28,7 @@ internal static class GameScanner
         if (!Directory.Exists(root)) return found;
 
         ScanDirectory(root, 0, 3, root, found, onFound, known);
+        RemoveSmallerBuilds(found);
         found.Sort((a, b) => string.Compare(a.Key, b.Key, StringComparison.OrdinalIgnoreCase));
         return found;
     }
@@ -77,14 +78,39 @@ internal static class GameScanner
     private static bool TryCreateEntry(string dir, string scanRoot, out GameEntry entry)
     {
         entry = (CreateMvMz(dir, scanRoot) ?? CreateRgss(dir, scanRoot) ?? CreateRm2k(dir, scanRoot) ??
-                 CreateWolf(dir, scanRoot))!;
+                 CreateWolf(dir, scanRoot) ?? CreateRenPy(dir, scanRoot) ?? CreateUnity(dir, scanRoot) ??
+                 CreateTyrano(dir, scanRoot))!;
         return entry is not null;
+    }
+
+    // "32" or "x86" as a word of its own or with "bit", not inside a number such as v1.32.
+    private static readonly Regex BuildRegex32 = new(@"(?<![\d.])32(?!\d)|(?<![A-Za-z\d])x86(?!\d)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Drops the 32-bit copy of a game shipped as 32- and 64-bit builds side by side ("Windows_32bit" beside
+    /// "Windows_64bit", "x86" beside "x64").
+    /// </summary>
+    private static void RemoveSmallerBuilds(List<GameEntry> found)
+    {
+        var byFolder = new Dictionary<string, GameEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var game in found) byFolder.TryAdd(game.RootPath, game);
+        found.RemoveAll(game =>
+        {
+            string name = game.FolderName;
+            string twin = BuildRegex32.Replace(name, match => match.Value.Equals("x86", StringComparison.OrdinalIgnoreCase) ? "x64" : "64");
+            if (twin == name || Path.GetDirectoryName(game.RootPath) is not { } parent) return false;
+            return byFolder.TryGetValue(Path.Combine(parent, twin), out var other) &&
+                   string.Equals(other.Engine, game.Engine, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(other.Title, game.Title, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     private static readonly string[] SignatureFiles =
     {
         @"data\System.json", @"www\data\System.json", "Game.ini", "Game.rgss3a", "Game.rgss2a", "Game.rgssad",
-        "RPG_RT.ldb", "RPG_RT.ini", "Data.wolf", "Game.exe", "RPG_RT.exe", "nw.exe"
+        "RPG_RT.ldb", "RPG_RT.ini", "Data.wolf", "Game.exe", "RPG_RT.exe", "nw.exe",
+        @"game\options.rpy", @"game\script_version.txt", "log.txt", "UnityPlayer.dll", "package.json", "package.nw",
+        @"data\system\Config.tjs"
     };
 
     /// <summary>Sizes and times of a folder's game-defining files; unchanged means the game is unchanged.</summary>
@@ -153,10 +179,11 @@ internal static class GameScanner
         string dataRoot = Path.GetDirectoryName(Path.GetDirectoryName(systemPath)!)!;
 
         var system = ReadSystem(systemPath);
+        string? title1 = FindTitleImage(dataRoot, system.Title1, isTitle2: false);
 
-        var encryptionKey = !string.IsNullOrWhiteSpace(system.EncryptionKey)
-            ? system.EncryptionKey!.Trim()
-            : FindKeyInScripts(dir, dataRoot);
+        // The pictures themselves give the key; System.json's can be a decoy for one hidden in the scripts.
+        var encryptionKey = KeyFromPicture(dataRoot, title1) ??
+                            (!string.IsNullOrWhiteSpace(system.EncryptionKey) ? system.EncryptionKey!.Trim() : FindKeyInScripts(dir, dataRoot));
 
         var title = FirstNonEmpty(system.Title, ReadPackageTitle(dir), Path.GetFileName(dir))!;
         var engine = DetectEngine(dir, dataRoot, system.PackageName);
@@ -170,7 +197,7 @@ internal static class GameScanner
             Title = title,
             Engine = engine,
             Locale = system.Locale,
-            Title1Path = FindTitleImage(dataRoot, system.Title1, isTitle2: false),
+            Title1Path = title1,
             Title2Path = FindTitleImage(dataRoot, system.Title2, isTitle2: true),
             IconPath = FindIcon(dir, dataRoot),
             EncryptionKey = encryptionKey,
@@ -330,6 +357,350 @@ internal static class GameScanner
         };
     }
 
+    private static readonly string[] AnyPictureExtensions = { ".png", ".jpg", ".jpeg", ".webp", ".bmp" };
+
+    /// <summary>A picture named <paramref name="name"/> (without extension) in a folder, in any usual format.</summary>
+    private static string? PictureIn(string folder, string name) =>
+        AnyPictureExtensions.Select(extension => Paths.File(Path.Combine(folder, name + extension))).FirstOrDefault(path => path is not null);
+
+    private static readonly Regex RenPyNameRegex = new(
+        @"^[ \t]*(?:define[ \t]+)?config\.name[ \t]*=[ \t]*(?:_\([ \t]*)?(?<q>[""'])(?<name>(?:(?!\k<q>).)+)\k<q>",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    private static readonly Regex PlistNameRegex = new(
+        @"<key>CFBundleDisplayName</key>\s*<string>(?<name>[^<]+)</string>", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Ren'Py: renpy\ (the engine) and game\ (scripts and archives) beside Name.exe, Name.py and Name.sh. The title is
+    /// config.name from game\options.rpy, else the name Ren'Py wrote in log.txt or in the Mac app's Info.plist, else
+    /// Name split into words.
+    /// </summary>
+    private static GameEntry? CreateRenPy(string dir, string scanRoot)
+    {
+        if (Paths.Folder(Path.Combine(dir, "renpy")) is null || Paths.Folder(Path.Combine(dir, "game")) is not { } game) return null;
+
+        // The launcher is named after the game's .py; "Name-32.exe" is the old 32-bit one, used only when it's alone.
+        string? name = null, exe = null;
+        try
+        {
+            foreach (var script in Directory.EnumerateFiles(dir, "*.py", Paths.AnyCase).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                string stem = Path.GetFileNameWithoutExtension(script);
+                name ??= stem;
+                if (Paths.File(Path.Combine(dir, stem + ".exe")) is not { } launcher) continue;
+                (name, exe) = (stem, launcher);
+                break;
+            }
+            exe ??= Directory.EnumerateFiles(dir, "*.exe", Paths.AnyCase).Order(StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+        }
+        catch
+        {
+            // unreadable folder
+        }
+        // A Linux or Mac download has no exe; on Linux its Name.sh starts it.
+        if (exe is null && name is not null) exe = Paths.File(Path.Combine(dir, name + ".sh"));
+        name ??= exe is null ? null : Path.GetFileNameWithoutExtension(exe);
+
+        string? title = RenPyName(game, dir, name);
+        return new GameEntry
+        {
+            Key = KeyFor(dir, scanRoot),
+            RootPath = dir,
+            ExecutablePath = exe,
+            DataRoot = game,
+            Title = FirstNonEmpty(title, name is null ? null : SplitWords(name), Path.GetFileName(dir))!,
+            Engine = "Ren'Py",
+            Title1Path = PictureIn(Path.Combine(game, "gui"), "main_menu") ?? PictureIn(game, "presplash") ??
+                         PictureIn(game, "presplash_background"),
+            IconPath = PictureIn(Path.Combine(game, "gui"), "window_icon"),
+            FolderCreatedUtc = FolderCreatedUtc(dir)
+        };
+    }
+
+    private static string? RenPyName(string game, string dir, string? name)
+    {
+        try
+        {
+            if (Paths.File(Path.Combine(game, "options.rpy")) is { } options &&
+                RenPyNameRegex.Match(TextFiles.Decode(File.ReadAllBytes(options))) is { Success: true } defined)
+                return defined.Groups["name"].Value;
+
+            // Newer Ren'Py versions log the game's name and version after their own version, then "Built at …".
+            if (Paths.File(Path.Combine(dir, "log.txt")) is { } log)
+            {
+                var lines = File.ReadLines(log).Take(40).Select(line => line.Trim()).ToList();
+                int version = lines.FindIndex(line => line.StartsWith("Ren'Py ", StringComparison.Ordinal));
+                if (version >= 0)
+                {
+                    var after = lines.Skip(version + 1).SkipWhile(line => line.Length == 0).Take(4).ToList();
+                    if (after.Count >= 3 && after.Skip(1).Take(3).Any(line => line.StartsWith("Built at ", StringComparison.Ordinal)))
+                        return after[0];
+                }
+            }
+
+            if (name is not null && Paths.File(Path.Combine(dir, name + ".app", "Contents", "Info.plist")) is { } plist &&
+                PlistNameRegex.Match(File.ReadAllText(plist)) is { Success: true } bundle)
+                return System.Net.WebUtility.HtmlDecode(bundle.Groups["name"].Value);
+        }
+        catch
+        {
+            // unreadable: the name then comes from the launcher's file name
+        }
+        return null;
+    }
+
+    /// <summary>"SummertimeSaga" or "hero_party-must_fall" as words: "Summertime Saga", "hero party must fall".</summary>
+    private static string SplitWords(string name)
+    {
+        string spaced = Regex.Replace(name.Replace('_', ' ').Replace('-', ' '), @"(?<=\p{Ll})(?=\p{Lu})|(?<=\p{L})(?=\d)", " ");
+        return Regex.Replace(spaced, @"\s+", " ").Trim();
+    }
+
+    private static readonly string[] UnityDataFiles = { "globalgamemanagers", "data.unity3d", "mainData", "level0", "resources.assets" };
+
+    /// <summary>
+    /// Unity: Name.exe (or a Linux Name.x86_64) beside Name_Data, which holds globalgamemanagers, data.unity3d,
+    /// mainData or level0. The title is the product name in Name_Data\app.info (company, then product).
+    /// </summary>
+    private static GameEntry? CreateUnity(string dir, string scanRoot)
+    {
+        string[] dataFolders;
+        try
+        {
+            dataFolders = Directory.GetDirectories(dir, "*_Data", Paths.AnyCase);
+        }
+        catch
+        {
+            return null;
+        }
+        string[] extensions = OperatingSystem.IsWindows() ? new[] { ".exe", ".x86_64", ".x86" } : new[] { ".x86_64", ".x86", ".exe" };
+        foreach (var data in dataFolders.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            string name = Path.GetFileName(data)[..^"_Data".Length];
+            if (name.Length == 0 || !UnityDataFiles.Any(file => Paths.File(Path.Combine(data, file)) is not null)) continue;
+            string? exe = extensions.Select(extension => Paths.File(Path.Combine(dir, name + extension))).FirstOrDefault(path => path is not null);
+            if (exe is null) continue;
+
+            string? product = null;
+            try
+            {
+                if (Paths.File(Path.Combine(data, "app.info")) is { } info)
+                    product = TextFiles.Decode(File.ReadAllBytes(info)).Split('\n').ElementAtOrDefault(1)?.Trim();
+            }
+            catch
+            {
+                // the exe names it then
+            }
+            return new GameEntry
+            {
+                Key = KeyFor(dir, scanRoot),
+                RootPath = dir,
+                ExecutablePath = exe,
+                DataRoot = data,
+                Title = FirstNonEmpty(product, name)!,
+                Engine = "Unity",
+                FolderCreatedUtc = FolderCreatedUtc(dir)
+            };
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// TyranoScript and TyranoBuilder: an NW.js (or Electron) app of index.html, tyrano\ (the engine) and data\
+    /// (scenario, system\Config.tjs, pictures). It is loose beside the exe, in package.nw or resources\app(.asar), or
+    /// zipped onto the end of the exe. The title is System.title in Config.tjs, else the window title in package.json.
+    /// </summary>
+    private static GameEntry? CreateTyrano(string dir, string scanRoot)
+    {
+        var (files, exe) = FindTyranoApp(dir);
+        if (files is null) return null;
+
+        string? Setting(string file, Func<string, string?> read)
+        {
+            try
+            {
+                return files.Read(file) is { } bytes ? read(TextFiles.Decode(bytes)) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        string? Usable(string? title) => string.IsNullOrWhiteSpace(title) || GameTitles.IsGeneric(title) ? null : title;
+
+        string? title = Usable(Setting("data/system/Config.tjs", text => TyranoSetting(text, "System.title"))) ??
+                        Usable(Setting("package.json", PackageWindowTitle)) ??
+                        Usable(exe is null ? null : Path.GetFileNameWithoutExtension(exe));
+        return new GameEntry
+        {
+            Key = KeyFor(dir, scanRoot),
+            RootPath = dir,
+            ExecutablePath = exe,
+            DataRoot = dir,
+            Title = FirstNonEmpty(title, Path.GetFileName(dir))!,
+            Engine = "TyranoScript",
+            Title1Path = TyranoTitlePicture(files),
+            FolderCreatedUtc = FolderCreatedUtc(dir)
+        };
+    }
+
+    /// <summary>A Tyrano game's files and the exe that runs it, or nulls when the folder holds none.</summary>
+    private static (AppFiles? Files, string? Exe) FindTyranoApp(string dir)
+    {
+        static bool IsTyrano(AppFiles files) =>
+            files.HasFolder("tyrano") && (files.HasFile("data/system/Config.tjs") || files.HasFolder("data/scenario"));
+
+        foreach (var folder in new[] { dir, Path.Combine(dir, "package.nw"), Path.Combine(dir, "resources", "app") })
+        {
+            if (Paths.Folder(folder) is { } found && AppFiles.InFolder(found) is var loose && IsTyrano(loose))
+                return (loose, AppExecutable(dir));
+        }
+        foreach (var package in new[] { Path.Combine(dir, "package.nw"), Path.Combine(dir, "resources", "app.asar") })
+        {
+            if (Paths.File(package) is { } found && AppArchive.Open(found) is { } archive && AppFiles.InArchive(found, archive) is var packed &&
+                IsTyrano(packed))
+                return (packed, AppExecutable(dir));
+        }
+
+        // Zipped onto an NW.js exe: only folders with NW.js's own files are worth opening exes for.
+        if (Paths.File(Path.Combine(dir, "nw.pak")) is null && Paths.File(Path.Combine(dir, "nw.dll")) is null) return (null, null);
+        foreach (var exe in Executables(dir).OrderByDescending(path => new FileInfo(path).Length))
+        {
+            if (AppArchive.Open(exe) is { } archive && AppFiles.InArchive(exe, archive) is var inside && IsTyrano(inside))
+                return (inside, exe);
+        }
+        return (null, null);
+    }
+
+    private static readonly string[] HelperExeWords =
+        { "notification_helper", "crashpad", "nwjc", "chromedriver", "payload", "unins", "setup", "UnityCrashHandler" };
+
+    private static IEnumerable<string> Executables(string dir)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(dir, "*.exe", Paths.AnyCase)
+                .Where(path => !HelperExeWords.Any(word => Path.GetFileName(path).Contains(word, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>The NW.js or Electron program of an HTML game: the biggest exe that isn't a helper.</summary>
+    private static string? AppExecutable(string dir) =>
+        Executables(dir).OrderByDescending(path => new FileInfo(path).Length).FirstOrDefault();
+
+    /// <summary>A setting in Config.tjs, read as TyranoScript does: lines starting with ';' are "key = value".</summary>
+    private static string? TyranoSetting(string text, string key)
+    {
+        string? value = null;
+        foreach (var raw in text.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (!line.StartsWith(';')) continue;
+            int comment = line.IndexOf("//", StringComparison.Ordinal);
+            if (comment >= 0) line = line[..comment];
+            line = line.Replace(";", "").Replace("\"", "");
+            int equals = line.IndexOf('=');
+            if (equals > 0 && line[..equals].Trim() == key) value = line[(equals + 1)..].Trim();
+        }
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string? PackageWindowTitle(string json)
+    {
+        using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+        return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("window", out var window) &&
+               window.ValueKind == JsonValueKind.Object && window.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String
+            ? title.GetString()
+            : null;
+    }
+
+    private static readonly Regex TyranoBgRegex = new(
+        @"[\[@]\s*bg\s[^\]\r\n]*?storage\s*=\s*[""']?(?<file>[^""'\s\]]+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The title screen's background: the first [bg storage=…] in the title scenario (title.ks, or another title*.ks),
+    /// else a picture in data\bgimage named "title", else one with "title" in its name.
+    /// </summary>
+    private static string? TyranoTitlePicture(AppFiles files)
+    {
+        try
+        {
+            var scenarios = files.FilesIn("data/scenario")
+                .Where(name => Path.GetFileName(name).StartsWith("title", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".ks", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(name => Path.GetFileName(name).Equals("title.ks", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .ThenBy(name => name, StringComparer.OrdinalIgnoreCase);
+            foreach (var scenario in scenarios)
+            {
+                if (files.Read(scenario) is not { } bytes) continue;
+                foreach (Match match in TyranoBgRegex.Matches(TextFiles.Decode(bytes)))
+                {
+                    string file = match.Groups["file"].Value.Replace('\\', '/').TrimStart('.', '/');
+                    if (file.Contains(':') || file.Contains("&")) continue;
+                    if (files.HasFile("data/bgimage/" + file)) return files.PathOf("data/bgimage/" + file);
+                }
+            }
+
+            var pictures = files.FilesIn("data/bgimage")
+                .Where(name => AnyPictureExtensions.Contains(Path.GetExtension(name), StringComparer.OrdinalIgnoreCase))
+                .Order(StringComparer.OrdinalIgnoreCase).ToList();
+            string? named = pictures.FirstOrDefault(name => Path.GetFileNameWithoutExtension(name).Equals("title", StringComparison.OrdinalIgnoreCase)) ??
+                            pictures.FirstOrDefault(name => Path.GetFileName(name).Contains("title", StringComparison.OrdinalIgnoreCase));
+            return named is null ? null : files.PathOf(named);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>An HTML game's files by '/'-separated name, loose in a folder or inside a package.</summary>
+    private sealed class AppFiles
+    {
+        private readonly string _root;
+        private readonly AppArchive? _archive;
+
+        private AppFiles(string root, AppArchive? archive)
+        {
+            _root = root;
+            _archive = archive;
+        }
+
+        public static AppFiles InFolder(string folder) => new(folder, null);
+
+        public static AppFiles InArchive(string file, AppArchive archive) => new(file, archive);
+
+        public bool HasFolder(string name) => _archive?.HasFolder(name) ?? Paths.Folder(Local(name)) is not null;
+
+        public bool HasFile(string name) => _archive?.Contains(name) ?? Paths.File(Local(name)) is not null;
+
+        public byte[]? Read(string name)
+        {
+            if (_archive is not null) return _archive.Read(name);
+            return Paths.File(Local(name)) is { } path ? File.ReadAllBytes(path) : null;
+        }
+
+        /// <summary>The files directly inside a folder, by name.</summary>
+        public IEnumerable<string> FilesIn(string folder)
+        {
+            if (_archive is not null)
+                return _archive.Names.Where(name => name.StartsWith(folder + "/", StringComparison.OrdinalIgnoreCase) &&
+                                                    name.IndexOf('/', folder.Length + 1) < 0);
+            if (Paths.Folder(Local(folder)) is not { } path) return Array.Empty<string>();
+            return Directory.EnumerateFiles(path).Select(file => folder + "/" + Path.GetFileName(file)).ToList();
+        }
+
+        /// <summary>Where the launcher loads a file from: its path, or "package::name" inside a package.</summary>
+        public string PathOf(string name) =>
+            _archive is null ? Paths.File(Local(name)) ?? Local(name) : _root + RgssArchive.Separator + name;
+
+        private string Local(string name) => Path.Combine(_root, name.Replace('/', Path.DirectorySeparatorChar));
+    }
+
     /// <summary>A game folder's creation time, the closest thing to its download date.</summary>
     public static DateTime? FolderCreatedUtc(string dir)
     {
@@ -473,6 +844,51 @@ internal static class GameScanner
             foreach (var name in new[] { "icon.png", "icon.ico", "icon.bmp" })
             {
                 if (Paths.File(Path.Combine(baseDir, "icon", name)) is { } path) return path;
+            }
+        }
+        return null;
+    }
+
+    // The first 16 bytes of every PNG: its signature, then the length and name of its IHDR chunk.
+    private static readonly byte[] PngStart =
+        { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52 };
+
+    /// <summary>
+    /// The key that decrypts an MV or MZ game's pictures, read back from one of them: after a 16-byte "RPGMV" header,
+    /// an encrypted picture is a PNG whose first 16 bytes are XORed with the key. Null when no picture is encrypted.
+    /// </summary>
+    private static string? KeyFromPicture(string dataRoot, string? title1)
+    {
+        static bool Encrypted(string path) =>
+            path.EndsWith(".rpgmvp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".png_", StringComparison.OrdinalIgnoreCase);
+
+        var samples = new List<string>();
+        if (title1 is not null && Encrypted(title1)) samples.Add(title1);
+        try
+        {
+            if (Paths.Folder(Path.Combine(dataRoot, "img", "system")) is { } system)
+                samples.AddRange(Directory.EnumerateFiles(system).Where(Encrypted).Order(StringComparer.OrdinalIgnoreCase).Take(3));
+        }
+        catch
+        {
+            // unreadable folder
+        }
+
+        foreach (var sample in samples)
+        {
+            try
+            {
+                var head = new byte[32];
+                using (var stream = new FileStream(sample, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    stream.ReadExactly(head);
+                if (head[0] != 'R' || head[1] != 'P' || head[2] != 'G' || head[3] != 'M' || head[4] != 'V') continue;
+                var key = new byte[16];
+                for (int i = 0; i < 16; i++) key[i] = (byte)(head[16 + i] ^ PngStart[i]);
+                return Convert.ToHexString(key).ToLowerInvariant();
+            }
+            catch
+            {
+                // too short or unreadable: try the next
             }
         }
         return null;

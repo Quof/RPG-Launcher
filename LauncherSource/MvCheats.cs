@@ -26,7 +26,7 @@ internal static class MvCheats
 
     // Scripts are ES5: MV games on NW.js 0.12 run Chromium 41, which has no arrow functions or let.
     // "loading" until the game objects exist, "title" before a game is started or loaded.
-    private const string PhaseFunction = @"
+    internal const string PhaseFunction = @"
 function rpgLauncherPhase() {
   if (typeof $gameParty === 'undefined' || !$gameParty || typeof $gameMap === 'undefined' || !$gameMap) return 'loading';
   var scene = typeof SceneManager !== 'undefined' ? SceneManager._scene : null;

@@ -1104,7 +1104,8 @@ internal sealed class MainWindow : Window
             if (StoreIdFromNames(game) is { } id &&
                 await MetadataService.LookupProductAsync(id, token) is { Metadata: not null } named)
                 return named;
-            return await MetadataService.LookupAsync(GameTitles.SearchQueries(game.Title, game.FolderName), token);
+            return await MetadataService.LookupAsync(GameTitles.SearchQueries(game.Title, game.FolderName), token,
+                strict: game.Family is EngineFamily.RenPy or EngineFamily.Unity);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -2107,8 +2108,12 @@ internal sealed class MainWindow : Window
 
         menu.Items.Add(Menus.Separator());
         AddEngineItem(menu, null, "All Engines");
+        // Engines with no games are left out, unless the library is narrowed to one.
         foreach (var family in EngineFamilies.All)
-            AddEngineItem(menu, family, $"{EngineFamilies.Label(family)}  ({_games.Count(g => g.Family == family)})");
+        {
+            int count = _games.Count(g => g.Family == family);
+            if (count > 0 || _store.Data.EngineFilter == family) AddEngineItem(menu, family, $"{EngineFamilies.Label(family)}  ({count})");
+        }
 
         // Groups narrow the library; the sort order above still applies inside a group.
         menu.Items.Add(Menus.Separator());
@@ -2749,7 +2754,7 @@ internal sealed class MainWindow : Window
         string locations = string.Join("\n  ", new[] { _root }.Concat(ExtraGameDirectories()));
         string message =
             "RPG Launcher\n\n" +
-            "A cover-flow library for RPG Maker MV and MZ games.\n\n" +
+            "A cover-flow library for RPG Maker, Wolf RPG Editor, Ren'Py, TyranoBuilder and Unity games.\n\n" +
             $"\u2022 {_games.Count} games detected in:\n  {locations}\n\n" +
             "\u2022 Click a title screen to launch the game\n" +
             "\u2022 Click the stars to rate a game (1\u20135)\n" +
@@ -2811,6 +2816,7 @@ internal sealed class MainWindow : Window
     /// </summary>
     private void PlayWithCheats(GameEntry game)
     {
+        if (game.Family != EngineFamily.MvMz && !EngineFamilies.HasTestMode(game.Family)) return;
         if (game.Family != EngineFamily.MvMz)
         {
             string arguments = game.Family switch
@@ -2904,14 +2910,16 @@ internal sealed class MainWindow : Window
         if (string.IsNullOrWhiteSpace(game.ExecutablePath) || !File.Exists(game.ExecutablePath))
         {
             _ = MessageDialog.ShowAsync(this,
-                $"No game executable was found for:\n{game.CardTitle}\n\nExpected Game.exe, nw.exe or RPG_RT.exe in:\n{game.RootPath}",
+                $"No program to start was found for:\n{game.CardTitle}\n\nin:\n{game.RootPath}",
                 "RPG Launcher");
             return false;
         }
 
         try
         {
-            var process = Process.Start(Shell.GameStartInfo(game.ExecutablePath, game.RootPath, arguments));
+            // On Linux a Ren'Py game starts with its own Linux build when it has one.
+            string program = (game.Family == EngineFamily.RenPy ? Shell.RenPyLinuxLauncher(game.ExecutablePath) : null) ?? game.ExecutablePath;
+            var process = Process.Start(Shell.GameStartInfo(program, game.RootPath, arguments));
             started = process;
 
             game.PlayCount++;
