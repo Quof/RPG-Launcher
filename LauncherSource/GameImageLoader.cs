@@ -242,8 +242,8 @@ internal static class GameImageLoader
         return image is null ? null : ImageKit.ToAvalonia(image);
     }
 
-    /// <summary>True when a picture is a single flat colour.</summary>
-    private static bool IsBlank(SKBitmap image)
+    /// <summary>True when a picture is a single flat colour, such as an unused template background.</summary>
+    internal static bool IsBlank(SKBitmap image)
     {
         var first = image.GetPixel(0, 0);
         for (int y = 0; y < 8; y++)
@@ -378,11 +378,7 @@ internal static class GameImageLoader
     {
         try
         {
-            // "…\Game.rgss3a::Graphics\Titles1\Title.png" is a picture inside an RPG Maker archive,
-            // "…\Game.exe::data/bgimage/title.jpg" one inside an HTML game's package.
-            var bytes = path.Contains(RgssArchive.Separator)
-                ? RgssArchive.ReadPath(path) ?? AppArchive.ReadPath(path)
-                : File.ReadAllBytes(path);
+            var bytes = path.Contains(RgssArchive.Separator) ? ReadPacked(path) : File.ReadAllBytes(path);
             if (bytes is null) return null;
             if (Rm2kFiles.IsXyz(bytes)) return Rm2kFiles.DecodeXyz(bytes);
             bytes = DecryptIfNeeded(bytes, encryptionKey);
@@ -392,6 +388,23 @@ internal static class GameImageLoader
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// A file inside a package: "…\Game.rgss3a::Graphics\Titles1\Title.png" (RPG Maker), "…\archive.rpa::gui/main_menu.png"
+    /// (Ren'Py), "…\Game.exe::data/bgimage/title.jpg" (an HTML game's package) or "…\Game.exe::#icon" (the exe's icon).
+    /// </summary>
+    private static byte[]? ReadPacked(string path)
+    {
+        int split = path.IndexOf(RgssArchive.Separator, StringComparison.Ordinal);
+        string file = path[..split], name = path[(split + RgssArchive.Separator.Length)..];
+        if (name == ExeIcon.Name) return ExeIcon.Read(file);
+        return Path.GetExtension(file).ToLowerInvariant() switch
+        {
+            ".rgssad" or ".rgss2a" or ".rgss3a" => RgssArchive.ReadPath(path),
+            ".rpa" => RpaArchive.Open(file)?.Read(name),
+            _ => AppArchive.Open(file)?.Read(name)
+        };
     }
 
     private static byte[]? DecryptIfNeeded(byte[] bytes, string? encryptionKey)

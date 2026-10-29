@@ -109,7 +109,8 @@ internal static class GameScanner
     {
         @"data\System.json", @"www\data\System.json", "Game.ini", "Game.rgss3a", "Game.rgss2a", "Game.rgssad",
         "RPG_RT.ldb", "RPG_RT.ini", "Data.wolf", "Game.exe", "RPG_RT.exe", "nw.exe",
-        @"game\options.rpy", @"game\script_version.txt", "log.txt", "UnityPlayer.dll", "package.json", "package.nw",
+        @"game\options.rpy", @"game\script_version.txt", @"game\gui.rpy", @"game\archive.rpa", "log.txt", "UnityPlayer.dll",
+        "package.json", "package.nw",
         @"data\system\Config.tjs"
     };
 
@@ -359,14 +360,6 @@ internal static class GameScanner
 
     private static readonly string[] AnyPictureExtensions = { ".png", ".jpg", ".jpeg", ".webp", ".bmp" };
 
-    /// <summary>A picture named <paramref name="name"/> (without extension) in a folder, in any usual format.</summary>
-    private static string? PictureIn(string folder, string name) =>
-        AnyPictureExtensions.Select(extension => Paths.File(Path.Combine(folder, name + extension))).FirstOrDefault(path => path is not null);
-
-    private static readonly Regex RenPyNameRegex = new(
-        @"^[ \t]*(?:define[ \t]+)?config\.name[ \t]*=[ \t]*(?:_\([ \t]*)?(?<q>[""'])(?<name>(?:(?!\k<q>).)+)\k<q>",
-        RegexOptions.Compiled | RegexOptions.Multiline);
-
     private static readonly Regex PlistNameRegex = new(
         @"<key>CFBundleDisplayName</key>\s*<string>(?<name>[^<]+)</string>", RegexOptions.Compiled);
 
@@ -401,7 +394,10 @@ internal static class GameScanner
         if (exe is null && name is not null) exe = Paths.File(Path.Combine(dir, name + ".sh"));
         name ??= exe is null ? null : Path.GetFileNameWithoutExtension(exe);
 
-        string? title = RenPyName(game, dir, name);
+        // Scripts and pictures may be loose or packed in the game's .rpa archives.
+        var files = new RenPyFiles(game);
+        string? title = RenPyName(files, dir, name);
+        var (picture, overlay) = SafelyPair(files.MenuPicture);
         return new GameEntry
         {
             Key = KeyFor(dir, scanRoot),
@@ -410,20 +406,43 @@ internal static class GameScanner
             DataRoot = game,
             Title = FirstNonEmpty(title, name is null ? null : SplitWords(name), Path.GetFileName(dir))!,
             Engine = "Ren'Py",
-            Title1Path = PictureIn(Path.Combine(game, "gui"), "main_menu") ?? PictureIn(game, "presplash") ??
-                         PictureIn(game, "presplash_background"),
-            IconPath = PictureIn(Path.Combine(game, "gui"), "window_icon"),
+            Title1Path = picture,
+            Title2Path = overlay,
+            IconPath = Safely(files.Icon),
             FolderCreatedUtc = FolderCreatedUtc(dir)
         };
     }
 
-    private static string? RenPyName(string game, string dir, string? name)
+    private static (string?, string?) SafelyPair(Func<(string?, string?)> find)
     {
         try
         {
-            if (Paths.File(Path.Combine(game, "options.rpy")) is { } options &&
-                RenPyNameRegex.Match(TextFiles.Decode(File.ReadAllBytes(options))) is { Success: true } defined)
-                return defined.Groups["name"].Value;
+            return find();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>A picture lookup's answer, or null when the game's files can't be read.</summary>
+    private static string? Safely(Func<string?> find)
+    {
+        try
+        {
+            return find();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
+
+    private static string? RenPyName(RenPyFiles files, string dir, string? name)
+    {
+        try
+        {
+            if (files.ConfigName() is { Length: > 0 } defined) return defined;
 
             // Newer Ren'Py versions log the game's name and version after their own version, then "Built at …".
             if (Paths.File(Path.Combine(dir, "log.txt")) is { } log)
@@ -499,6 +518,8 @@ internal static class GameScanner
                 DataRoot = data,
                 Title = FirstNonEmpty(product, name)!,
                 Engine = "Unity",
+                // Unity packs its pictures away; the exe's icon, when it's the game's own, stands in.
+                IconPath = exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && ExeIcon.HasOwn(exe) ? ExeIcon.PathFor(exe) : null,
                 FolderCreatedUtc = FolderCreatedUtc(dir)
             };
         }

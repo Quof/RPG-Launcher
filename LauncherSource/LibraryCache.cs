@@ -8,7 +8,8 @@ namespace RpgLauncher;
 internal static class LibraryCache
 {
     // 2: adds RPG Maker XP, VX, VX Ace, 2000/2003 and Wolf RPG Editor games. 3: adds Ren'Py, TyranoScript and Unity games.
-    private const int CurrentVersion = 3;
+    // 4: Ren'Py pictures from archives and scripts, Unity games' icons.
+    private const int CurrentVersion = 4;
 
     private static readonly JsonSerializerOptions Options = new()
     {

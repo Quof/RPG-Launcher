@@ -26,9 +26,9 @@ A Windows and Linux launcher for RPG Maker, Wolf RPG Editor, Ren'Py, TyranoBuild
 
 Encrypted MV/MZ images and RGSS archives are read directly. Wolf games use the folder name as title until DLsite supplies one.
 
-- **Ren'Py** titles come from `game\options.rpy`, else from the game's `log.txt` (once it has been played) or its Mac app; the card picture is `game\gui\main_menu.png` or the loading screen.
+- **Ren'Py** titles come from `config.name` in the game's scripts, else from its `log.txt` (once it has been played) or its Mac app. The card picture is the main menu's background, found by following the scripts the way Ren'Py does (inside `.rpa` archives too), else the loading screen.
 - **TyranoBuilder / TyranoScript** titles come from `data\system\Config.tjs`, and the card picture is the title scenario's background, read from inside the exe or package when the game is packed.
-- **Unity** titles come from `Name_Data\app.info`. Unity games keep their pictures packed away, so their cards show the DLsite image or a placeholder.
+- **Unity** titles come from `Name_Data\app.info`. Unity games keep their pictures packed away, so their cards show the DLsite image, or else the game's own icon from its exe (Unity's default icon is skipped).
 - A game shipped as 32- and 64-bit builds side by side (`Windows_32bit`, `Windows_64bit`) is listed once, as the 64-bit build.
 
 ## Features
