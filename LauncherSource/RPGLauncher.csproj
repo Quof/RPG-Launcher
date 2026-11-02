@@ -34,6 +34,7 @@
   <ItemGroup>
     <EmbeddedResource Include="app.ico" LogicalName="RpgLauncher.app.ico" />
     <EmbeddedResource Include="Assets\*.png" LogicalName="RpgLauncher.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets\*.json" LogicalName="RpgLauncher.Assets.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

@@ -23,6 +23,8 @@ internal sealed class MainWindow : Window
     private readonly ReleasesView _releases;
     private readonly ReleaseStore _releaseStore;
     private readonly ManualPanel _body = new();
+    private VipView? _vip;
+    private bool _libraryStarted;
     private readonly string? _screenshot;
 
     private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromMilliseconds(5200) };
@@ -239,7 +241,13 @@ internal sealed class MainWindow : Window
         RememberNormalBounds();
         Look.PixelScale = RenderScaling;
         ScalingChanged += (_, _) => Look.PixelScale = RenderScaling;
-        _ = LoadLibraryAsync();
+        // Runtimes copied into game folders by a launcher that closed before its games did.
+        var rm2k = _store.Data.Rm2k;
+        var leftovers = rm2k.Borrowed.ToList();
+        var search = Rm2kRuntimeSearch().ToList();
+        if (leftovers.Count > 0) _ = Task.Run(() => Rm2kLauncher.CleanUp(rm2k, leftovers, search));
+        if (_store.Data.Mode == LauncherMode.Vip) ShowVipMode();
+        else StartLibrary();
         if (_screenshot is not null) _ = CaptureScreenshotAsync(_screenshot);
     }
 
@@ -248,9 +256,19 @@ internal sealed class MainWindow : Window
     {
         await Task.Delay(2600);
         // Give metadata lookups a chance to finish so the capture shows them.
-        var deadline = DateTime.UtcNow.AddSeconds(20);
-        while (MetadataLookupsRunning && DateTime.UtcNow < deadline)
+        // A first VIPRPG scan of a big folder can take a few minutes.
+        var deadline = DateTime.UtcNow.AddSeconds(_vip is null ? 20 : 240);
+        while ((MetadataLookupsRunning || _vip?.Busy == true) && DateTime.UtcNow < deadline)
             await Task.Delay(150);
+        // Keys to press first, to capture a menu or window: RPGLAUNCHER_SCREENSHOT_KEYS=Right,Down,Enter.
+        foreach (string name in (Environment.GetEnvironmentVariable("RPGLAUNCHER_SCREENSHOT_KEYS") ?? "")
+                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!Enum.TryParse<Key>(name, ignoreCase: true, out var key)) continue;
+            var target = FocusManager?.GetFocusedElement() as Control ?? this;
+            target.RaiseEvent(new KeyEventArgs { RoutedEvent = KeyDownEvent, Key = key, Source = target });
+            await Task.Delay(120);
+        }
         await Task.Delay(700);
         try
         {
@@ -1725,6 +1743,72 @@ internal sealed class MainWindow : Window
         return root;
     }
 
+    /// <summary>How RPG Maker 2000/2003 games start: RPG_RT.exe with MoshimoLoader's fixes, or EasyRPG Player.</summary>
+    private DarkMenuItem BuildRm2kMenu(DarkMenu owner)
+    {
+        var options = _store.Data.Rm2k;
+        var root = Menus.Item($"RPG Maker 2000/2003: {(options.UseEasyRpg ? "EasyRPG Player" : "RPG_RT")}");
+
+        DarkMenuItem Toggle(string text, bool value, Action change, bool enabled = true)
+        {
+            var item = Menus.Item(text, (_, _) =>
+            {
+                change();
+                SaveData();
+            });
+            item.Checked = value;
+            item.Enabled = enabled;
+            return item;
+        }
+
+        bool rpgRt = !options.UseEasyRpg;
+        root.DropDownItems.Add(Toggle("Use EasyRPG Player", options.UseEasyRpg, () => options.UseEasyRpg = !options.UseEasyRpg));
+        root.DropDownItems.Add(Toggle("Start in a window", options.Window, () => options.Window = !options.Window));
+        root.DropDownItems.Add(Toggle("Small window (RPG_RT)", options.SmallWindow, () => options.SmallWindow = !options.SmallWindow, rpgRt));
+        root.DropDownItems.Add(Toggle("One CPU core (RPG_RT)", options.SingleCpu, () => options.SingleCpu = !options.SingleCpu, rpgRt));
+        root.DropDownItems.Add(Toggle("Memory stream error fix (RPG_RT)", options.MemoryStreamFix,
+            () => options.MemoryStreamFix = !options.MemoryStreamFix, rpgRt && OperatingSystem.IsWindows()));
+        root.DropDownItems.Add(Menus.Separator());
+        root.DropDownItems.Add(Menus.Item(
+            $"Runtime folder: {(options.RuntimeFolder is null ? "automatic" : Path.GetFileName(options.RuntimeFolder.TrimEnd('\\', '/')))}…",
+            (_, _) => _ = ChooseRuntimeFolderAsync()));
+        root.DropDownItems.Add(Menus.Item(
+            $"EasyRPG Player: {(options.EasyRpgPath is null ? "automatic" : Path.GetFileName(options.EasyRpgPath))}…",
+            (_, _) => _ = ChooseEasyRpgAsync()));
+        Menus.StyleSubmenu(root, owner, checks: true);
+        return root;
+    }
+
+    private async Task ChooseRuntimeFolderAsync()
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Folder with 2000\\RPG_RT.exe and 2003\\RPG_RT.exe (for games shipped without one)",
+            AllowMultiple = false
+        });
+        if (folders.Count == 0 || folders[0].TryGetLocalPath() is not { } folder) return;
+        _store.Data.Rm2k.RuntimeFolder = folder;
+        SaveData();
+        bool has2000 = Paths.File(Path.Combine(folder, "2000", "RPG_RT.exe")) is not null;
+        bool has2003 = Paths.File(Path.Combine(folder, "2003", "RPG_RT.exe")) is not null;
+        SetStatus(has2000 || has2003
+            ? $"Runtime folder set · {(has2000 ? "2000" : "")}{(has2000 && has2003 ? " and " : "")}{(has2003 ? "2003" : "")} found"
+            : "Runtime folder set, but it has no 2000\\RPG_RT.exe or 2003\\RPG_RT.exe");
+    }
+
+    private async Task ChooseEasyRpgAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "EasyRPG Player (Player.exe)",
+            AllowMultiple = false
+        });
+        if (files.Count == 0 || files[0].TryGetLocalPath() is not { } file) return;
+        _store.Data.Rm2k.EasyRpgPath = file;
+        SaveData();
+        SetStatus("EasyRPG Player set · games that ship their own Player.exe still use theirs");
+    }
+
     private DarkMenuItem BuildCardShapeMenu(DarkMenu owner)
     {
         var current = _store.Data.CardShape;
@@ -2666,12 +2750,83 @@ internal sealed class MainWindow : Window
         menu.Items.Add(BuildStyleMenu(menu));
         menu.Items.Add(BuildCardShapeMenu(menu));
         menu.Items.Add(BuildCardPictureMenu(menu));
+        menu.Items.Add(BuildRm2kMenu(menu));
         menu.Items.Add(Menus.Separator());
         menu.Items.Add(Menus.Item("Clear all ratings", (_, _) => ClearAllRatings()));
         menu.Items.Add(Menus.Item("About RPG Launcher", (_, _) => ShowAbout()));
+        menu.Items.Add(Menus.Separator());
+        menu.Items.Add(Menus.Item("Mode: HRPG", (_, _) => SetMode(LauncherMode.Vip)));
 
         Menus.Show(menu, _moreButton, new Point(0, _moreButton.Bounds.Height + 4));
     }
+
+    // ---- modes ----
+
+    private void StartLibrary()
+    {
+        if (_libraryStarted) return;
+        _libraryStarted = true;
+        _ = LoadLibraryAsync();
+    }
+
+    /// <summary>Switches between the HRPG library and VIPRPG mode, which has its own screen and folders and no DLsite.</summary>
+    private void SetMode(LauncherMode mode)
+    {
+        _store.Data.Mode = mode;
+        SaveData();
+        if (mode == LauncherMode.Vip) ShowVipMode();
+        else ShowHrpgMode();
+    }
+
+    private void ShowVipMode()
+    {
+        // Nothing of the HRPG side runs meanwhile: no metadata lookups, DLsite pictures or new releases.
+        _loadCts?.Cancel();
+        _releaseCts?.Cancel();
+        _tagPopup?.Close();
+        _tagPicker?.Close();
+
+        if (_vip is null)
+        {
+            _vip = new VipView(_store, _root, SaveData, Rm2kRuntimeSearch);
+            _vip.ModeRequested += SetMode;
+        }
+        Content = _vip;
+        Title = "VIPRPG 保管庫 — RPG Launcher";
+        _vip.Start();
+    }
+
+    private void ShowHrpgMode()
+    {
+        _vip?.Stop();
+        Content = _body;
+        Title = "RPG Launcher";
+        if (!_libraryStarted)
+        {
+            StartLibrary();
+            return;
+        }
+
+        // Pick up the thumbnail, metadata and DLsite picture work VIPRPG mode stopped.
+        if (_loading || _closed) return;
+        if (_games.Count == 0)
+        {
+            _ = LoadLibraryAsync();
+            return;
+        }
+        _loadCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _loadCts = cts;
+        QueueThumbnails(cts.Token);
+        if (_store.Data.CardShape == CardShape.Square) QueueFullThumbnails(cts.Token);
+        QueueMetadata(cts.Token);
+        QueueStoreImages(cts.Token);
+        ResetStatus();
+    }
+
+    /// <summary>Folders to look for a shared RPG_RT.exe beside: the launcher's, the added ones and VIPRPG mode's.</summary>
+    private IEnumerable<string> Rm2kRuntimeSearch() =>
+        new[] { _root }.Concat(_store.Data.GameDirectories).Concat(_store.Data.Vip.Directories);
 
     private async void ChooseWineCommand()
     {
@@ -2825,7 +2980,7 @@ internal sealed class MainWindow : Window
             string arguments = game.Family switch
             {
                 EngineFamily.Xp => "debug",
-                EngineFamily.Rm2k => "TestPlay Window",
+                EngineFamily.Rm2k => Rm2kLauncher.Arguments(_store.Data.Rm2k, testPlay: true),
                 _ => "test"
             };
             if (StartGame(game, arguments, out _))
@@ -2910,7 +3065,8 @@ internal sealed class MainWindow : Window
     private bool StartGame(GameEntry game, string? arguments, out Process? started)
     {
         started = null;
-        if (string.IsNullOrWhiteSpace(game.ExecutablePath) || !File.Exists(game.ExecutablePath))
+        bool rm2k = game.Family == EngineFamily.Rm2k;
+        if (!rm2k && (string.IsNullOrWhiteSpace(game.ExecutablePath) || !File.Exists(game.ExecutablePath)))
         {
             _ = MessageDialog.ShowAsync(this,
                 $"No program to start was found for:\n{game.CardTitle}\n\nin:\n{game.RootPath}",
@@ -2920,9 +3076,23 @@ internal sealed class MainWindow : Window
 
         try
         {
-            // On Linux a Ren'Py game starts with its own Linux build when it has one.
-            string program = (game.Family == EngineFamily.RenPy ? Shell.RenPyLinuxLauncher(game.ExecutablePath) : null) ?? game.ExecutablePath;
-            var process = Process.Start(Shell.GameStartInfo(program, game.RootPath, arguments));
+            Process? process;
+            if (rm2k)
+            {
+                bool testPlay = arguments?.StartsWith("TestPlay", StringComparison.OrdinalIgnoreCase) == true;
+                process = Rm2kLauncher.Start(game, _store.Data.Rm2k, testPlay, Rm2kRuntimeSearch(), out string? problem);
+                if (process is null)
+                {
+                    _ = MessageDialog.ShowAsync(this, problem ?? "The game could not be started.", "RPG Launcher");
+                    return false;
+                }
+            }
+            else
+            {
+                // On Linux a Ren'Py game starts with its own Linux build when it has one.
+                string program = (game.Family == EngineFamily.RenPy ? Shell.RenPyLinuxLauncher(game.ExecutablePath!) : null) ?? game.ExecutablePath!;
+                process = Process.Start(Shell.GameStartInfo(program, game.RootPath, arguments));
+            }
             started = process;
 
             game.PlayCount++;
@@ -3040,6 +3210,7 @@ internal sealed class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
     {
+        if (_vip is not null && ReferenceEquals(Content, _vip)) return;
         bool control = e.KeyModifiers.HasFlag(KeyModifiers.Control);
         if (e.Key == Key.F5)
         {
@@ -3094,6 +3265,7 @@ internal sealed class MainWindow : Window
 
         _loadCts?.Cancel();
         _releaseCts?.Cancel();
+        _vip?.Stop();
         base.OnClosing(e);
     }
 

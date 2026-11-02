@@ -70,6 +70,30 @@ Encrypted MV/MZ images and RGSS archives are read directly. Wolf games use the f
 - **Play in Test Mode** (VX Ace, VX, XP, 2000/2003) starts the engine's own test play: hold Ctrl to walk through walls; F9 opens the switch and variable editor.
 - Wolf RPG Editor, Ren'Py, TyranoBuilder and Unity games have no cheats.
 
+## RPG Maker 2000 / 2003
+
+**⋯ → RPG Maker 2000/2003** (or **設定** in VIPRPG mode) sets how these games start, after MoshimoLoader's launch options:
+
+- **Runtime folder** — many games, VIPRPG ones especially, ship without `RPG_RT.exe`. Point this at a folder holding `2000\RPG_RT.exe` and `2003\RPG_RT.exe` (MoshimoLoader's `Data\Runtime` is found on its own when a game folder sits inside MoshimoLoader). The right runtime is copied into the game folder while it runs and removed afterwards.
+- **Start in a window** — RPG_RT's `Window` argument; off starts full screen.
+- **Small window** — presses F5 once the game is up, RPG_RT's switch to its 320×240 window.
+- **One CPU core** — some games run too fast or freeze on several cores.
+- **Memory stream error fix** — patches the cause of RPG_RT's "memory stream error" in the running game (Windows; the exe on disk is not changed).
+- **Use EasyRPG Player** — runs the games with [EasyRPG Player](https://easyrpg.org/) instead (`--project-path … --window`). A game that ships its own `Player.exe` and no `RPG_RT.exe` always uses its own; otherwise the chosen Player.exe or one beside the launcher. EasyRPG also starts games nothing else can (no `RPG_RT.exe` and no runtime folder). On Linux, an installed `easyrpg-player` runs natively, without Wine.
+
+## VIPRPG mode
+
+**⋯ → Mode: HRPG** switches to VIPRPG mode, and **Mode: VIPRPG** there switches back. It is a separate screen in the style of an RPG Maker 2000 game and the VIPRPG matsuri sites, with its own game folders and no DLsite at all.
+
+- Every matsuri from 2005 on, with its works (about 4,300), listed **by matsuri** (祭り別) or **by author** (作者別). Each work links to its wiki page and its 感想スレ where they exist, and each matsuri to its site and its archived copy. Works on this PC are marked ▶ and start with Enter or a click; **手持ち** lists only those.
+- Games are matched to works by entry number when their folders name the matsuri (`Kouhaku 2024\kouhaku2024_32`), otherwise by title. Games the wiki doesn't list are under **その他のゲーム**.
+- Zipped games show as Z: **展開** unpacks one beside its zip (Shift-JIS names included) and rescans.
+- **説明書** shows the game's readme files; **テスト** starts test play.
+- Keys: arrows move, Enter/Z confirms, Esc/X goes back, F5 rescans. Mouse and wheel work too.
+- The windows, Alex and the party come from the RPG Maker 2000 RTP installed on the PC (the one VIPRPG games need), read when the launcher runs; none of it is included in the launcher. Without an RTP the windows are drawn plainly and nobody walks.
+- To use other sozai, put `party.png` (a character set), `face.png` (a face set), `monster.png` and `system.png` (a system graphic) in a `vip-sozai` folder beside the launcher.
+- Work lists come from [VIPRPG全祭り補完サイト](https://fes.viprpg.org/) and the [VIPRPG wiki](https://w.atwiki.jp/vip_rpg/pages/502.html), built into the launcher.
+
 ## Linux
 
 - The launcher is a native Linux program. Unpack the `.tar.gz` (it keeps the file executable) and run `RPG Launcher`; it needs X11 or XWayland and the ICU library (`libicu`), which desktop distributions include.

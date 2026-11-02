@@ -351,8 +351,88 @@ internal sealed class LauncherData
 
     /// <summary>Command that runs games on Linux (⋯ → Wine command…); null uses "wine".</summary>
     public string? WineCommand { get; set; }
+
+    /// <summary>The HRPG library or the VIPRPG archive (⋯ → Mode).</summary>
+    public LauncherMode Mode { get; set; } = LauncherMode.Hrpg;
+
+    /// <summary>How RPG Maker 2000/2003 games are started, in both modes.</summary>
+    public Rm2kOptions Rm2k { get; set; } = new();
+
+    /// <summary>VIPRPG mode's folders, play records and view.</summary>
+    public VipData Vip { get; set; } = new();
     public MetadataLanguage MetadataLanguage { get; set; } = MetadataLanguage.English;
     public WindowState Window { get; set; } = new();
     public List<string> GameDirectories { get; set; } = new();
     public Dictionary<string, GameRecord> Games { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>The two faces of the launcher: the HRPG library with DLsite data, or the VIPRPG archive.</summary>
+internal enum LauncherMode
+{
+    Hrpg,
+    Vip
+}
+
+/// <summary>RPG Maker 2000/2003 launch options, after MoshimoLoader's.</summary>
+internal sealed class Rm2kOptions
+{
+    /// <summary>Start in a window rather than full screen.</summary>
+    public bool Window { get; set; } = true;
+
+    /// <summary>Switch to the small 320×240 window once the game is up (the game's own F5 toggle).</summary>
+    public bool SmallWindow { get; set; }
+
+    /// <summary>Keep the game on one CPU core; some games run too fast or freeze on several.</summary>
+    public bool SingleCpu { get; set; }
+
+    /// <summary>Patch out the "memory stream error" (メモリーストリームエラー) while the game runs. Windows only.</summary>
+    public bool MemoryStreamFix { get; set; } = true;
+
+    /// <summary>
+    /// Folder holding RPG_RT.exe for games shipped without one: 2000\RPG_RT.exe and 2003\RPG_RT.exe (MoshimoLoader's
+    /// Data\Runtime layout). Null looks for a MoshimoLoader next to the game folders.
+    /// </summary>
+    public string? RuntimeFolder { get; set; }
+
+    /// <summary>Run games with EasyRPG Player instead of RPG_RT.exe.</summary>
+    public bool UseEasyRpg { get; set; }
+
+    /// <summary>EasyRPG Player's program; null looks beside the launcher. A game's own copy is used first.</summary>
+    public string? EasyRpgPath { get; set; }
+
+    /// <summary>Runtimes copied into game folders that may still need removing (the launcher closed first).</summary>
+    public List<string> Borrowed { get; set; } = new();
+}
+
+/// <summary>VIPRPG mode's own library, kept apart from the HRPG one.</summary>
+internal sealed class VipData
+{
+    /// <summary>Folders scanned for VIPRPG games.</summary>
+    public List<string> Directories { get; set; } = new();
+
+    /// <summary>Play records by game folder (full path).</summary>
+    public Dictionary<string, VipRecord> Games { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The list shown: by matsuri, by author, or games on this PC.</summary>
+    public VipListMode List { get; set; } = VipListMode.Matsuri;
+
+    /// <summary>Last matsuri or author picked in the side list.</summary>
+    public string? Selected { get; set; }
+
+    /// <summary>Times VIPRPG mode was opened: the visitor counter every matsuri site had.</summary>
+    public int Visitors { get; set; }
+}
+
+internal enum VipListMode
+{
+    Matsuri,
+    Author,
+    Owned
+}
+
+internal sealed class VipRecord
+{
+    public int PlayCount { get; set; }
+    public long PlaySeconds { get; set; }
+    public DateTime? LastPlayedUtc { get; set; }
 }
