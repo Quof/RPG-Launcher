@@ -383,6 +383,13 @@ internal static class Look
         return rem == 0 ? $"{hours}h" : $"{hours}h {rem}m";
     }
 
+    public static string FormatBytes(long bytes) => bytes switch
+    {
+        < 1024 * 1024 => $"{Math.Max(1, bytes / 1024)} KB",
+        < 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024):0.0} MB",
+        _ => $"{bytes / (1024.0 * 1024 * 1024):0.00} GB"
+    };
+
     public static string LastPlayedText(DateTime? utc)
     {
         if (utc is null) return "";

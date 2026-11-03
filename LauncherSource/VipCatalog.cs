@@ -45,6 +45,9 @@ internal sealed class VipWork
     /// <summary>The work's thread on the matsuri's board (感想スレ).</summary>
     public string? ForumUrl { get; set; }
 
+    /// <summary>The download links the matsuri listed (itch.io, Google Drive, MEGA…), many of them dead by now.</summary>
+    public List<string>? Downloads { get; set; }
+
     [JsonIgnore] public VipMatsuri? Event { get; set; }
 
     /// <summary>The copy on this PC, once matched.</summary>
@@ -112,7 +115,7 @@ internal sealed class VipCatalog
     // ---- matching games on this PC to works ----
 
     // Folder and zip names such as "kouhaku2024_32", "kohaku_011", "gw16_18", "No.21 Title", "12th_1924".
-    private static readonly Regex NumberRegex = new(@"(?:no\.?\s*|[_#-])0*(?<no>\d{1,3})(?![0-9])|^0*(?<no>\d{1,3})(?=[-_ .])",
+    private static readonly Regex NumberRegex = new(@"(?:no\.?\s*|[_#-])0*(?<no>[0-9]{1,3})(?![0-9])|^0*(?<no>[0-9]{1,3})(?=[-_ .])",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex YearRegex = new(@"(?<![0-9])(?:20)?(?<year>0[4-9]|1[0-9]|2[0-9])(?![0-9])|(?<year4>20[0-2][0-9])", RegexOptions.Compiled);
 

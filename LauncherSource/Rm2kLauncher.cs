@@ -106,7 +106,7 @@ internal static class Rm2kLauncher
                             string.Equals(Path.GetDirectoryName(easyRpg), Path.GetFullPath(folder).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
         string? shared = own is null && !options.UseEasyRpg && !shipsEasyRpg ? SharedRuntime(options, is2003, libraryFolders) : null;
         // EasyRPG when chosen, and for a game nothing else can start.
-        if (options.UseEasyRpg || shipsEasyRpg || (own is null && shared is null))
+        if (options.UseEasyRpg || shipsEasyRpg || (own is null && shared is null && options.EasyRpgFallback))
         {
             if (easyRpg is not null) return StartEasyRpg(easyRpg, folder, options, testPlay);
             problem = options.UseEasyRpg
@@ -115,6 +115,12 @@ internal static class Rm2kLauncher
             return null;
         }
 
+        if (own is null && shared is null)
+        {
+            problem = $"{game.DisplayTitle} has no RPG_RT.exe, and EasyRPG Player is turned off for such games.\n\n" +
+                      @"Turn it on, or choose a runtime folder (with 2000\RPG_RT.exe and 2003\RPG_RT.exe).";
+            return null;
+        }
         string exe = own ?? Path.Combine(folder, "RPG_RT.exe");
         bool borrowed = false;
         if (own is null)

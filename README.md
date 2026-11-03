@@ -79,19 +79,27 @@ Encrypted MV/MZ images and RGSS archives are read directly. Wolf games use the f
 - **Small window** — presses F5 once the game is up, RPG_RT's switch to its 320×240 window.
 - **One CPU core** — some games run too fast or freeze on several cores.
 - **Memory stream error fix** — patches the cause of RPG_RT's "memory stream error" in the running game (Windows; the exe on disk is not changed).
-- **Use EasyRPG Player** — runs the games with [EasyRPG Player](https://easyrpg.org/) instead (`--project-path … --window`). A game that ships its own `Player.exe` and no `RPG_RT.exe` always uses its own; otherwise the chosen Player.exe or one beside the launcher. EasyRPG also starts games nothing else can (no `RPG_RT.exe` and no runtime folder). On Linux, an installed `easyrpg-player` runs natively, without Wine.
+- **EasyRPG Player** — [EasyRPG Player](https://easyrpg.org/) 0.8 comes with the launcher (`EasyRPG\Player.exe`, GPL v3; see `EasyRPG\README.txt`). By default it runs games that have no `RPG_RT.exe` and no runtime folder to borrow one from; **Use EasyRPG Player** runs every 2000/2003 game with it, and it can be turned off (VIPRPG mode: **設定 → EasyRPGを使う**). A game that ships its own `Player.exe` uses that. On Linux, an installed `easyrpg-player` runs natively, without Wine.
 
 ## VIPRPG mode
 
-**⋯ → Mode: HRPG** switches to VIPRPG mode, and **Mode: VIPRPG** there switches back. It is a separate screen in the style of an RPG Maker 2000 game and the VIPRPG matsuri sites, with its own game folders and no DLsite at all.
+**⋯ → Mode: HRPG** switches to VIPRPG mode, and **設定 → モード** there switches back. It is a separate screen in the style of an RPG Maker 2000 game and the VIPRPG matsuri sites, with its own game folders and no DLsite at all.
 
 - Every matsuri from 2005 on, with its works (about 4,300), listed **by matsuri** (祭り別) or **by author** (作者別). Each work links to its wiki page and its 感想スレ where they exist, and each matsuri to its site and its archived copy. Works on this PC are marked ▶ and start with Enter or a click; **手持ち** lists only those.
 - Games are matched to works by entry number when their folders name the matsuri (`Kouhaku 2024\kouhaku2024_32`), otherwise by title. Games the wiki doesn't list are under **その他のゲーム**.
+- Works show their title screen once they're on the PC; before that, a screenshot or cover from the matsuri's archived site on [fes.viprpg.org](https://fes.viprpg.org/), built into the launcher (about 2,100 works, at most 640×480).
 - Zipped games show as Z: **展開** unpacks one beside its zip (Shift-JIS names included) and rescans.
+- **Downloads.** Works the [VIPRPG アップローダー保存庫](https://uploader.viprpg.org/) has archived are marked ↓; its index (about 10,000 files from the old matsuri and thread uploaders, stored on archive.org) is built into the launcher. **ダウンロード** (or Enter, or D) downloads one from archive.org, checks its size and checksum, unpacks it and rescans; pressing it again (中止) stops the download.
+  - Games go in **設定 → ダウンロード先**, by default a `games` folder beside the launcher, as `<matsuri-id>\<No>.zip`, which is removed after unpacking. A download stays matched to its work whatever the zip's folder is called.
+  - Archived games the catalog doesn't list, such as thread games, are listed under the uploader they came from, below the matsuri.
+  - `.rar`, `.7z`, `.lzh` and `.exe` downloads are saved and shown in their folder, to unpack or run yourself; press F5 after.
+  - Files the archive held back after an antivirus check, or that were password-protected, can't be downloaded.
+  - Works the archive doesn't have yet (such as recent matsuri on itch.io) download from the link the matsuri listed, when it's a free itch.io game, a Google Drive file or a Wayback Machine copy. **配布元** opens the original link for any work, including ones on MEGA, Yahoo and other sites the launcher can't download from.
 - **説明書** shows the game's readme files; **テスト** starts test play.
-- Keys: arrows move, Enter/Z confirms, Esc/X goes back, F5 rescans. Mouse and wheel work too.
-- The windows, Alex and the party come from the RPG Maker 2000 RTP installed on the PC (the one VIPRPG games need), read when the launcher runs; none of it is included in the launcher. Without an RTP the windows are drawn plainly and nobody walks.
-- To use other sozai, put `party.png` (a character set), `face.png` (a face set), `monster.png` and `system.png` (a system graphic) in a `vip-sozai` folder beside the launcher.
+- The left half goes a page at a time: the list type (手持ち, 全作品, 祭り別, 作者別), then a matsuri, author or filter, then its works; ◀ or Esc goes back. The right half shows the selected work. 再スキャン, フォルダ追加 and 設定 are at the top right.
+- Keys: arrows move, Enter/Z or → goes in, Esc/X or ← goes back, Ctrl+F searches, F5 rescans, D downloads, S opens 設定. Mouse and wheel work too.
+- The windows come from the RPG Maker 2000 RTP installed on the PC (the one VIPRPG games need), read when the launcher runs; none of it is included in the launcher. Without an RTP they are drawn plainly.
+- To use another system graphic, put it in a `vip-sozai` folder beside the launcher as `system.png`.
 - Work lists come from [VIPRPG全祭り補完サイト](https://fes.viprpg.org/) and the [VIPRPG wiki](https://w.atwiki.jp/vip_rpg/pages/502.html), built into the launcher.
 
 ## Linux
@@ -112,6 +120,7 @@ Stored next to the exe:
 | `launcher-library.json`, `launcher-thumbnails\` | Scan cache (safe to delete) |
 | `launcher-images\` | Custom and DLsite card images |
 | `launcher-dlsite\` | New-release cache |
+| `launcher-vip-library.json`, `launcher-vip-server.json` | VIPRPG mode's scan cache and download list (safe to delete) |
 
 Delete them all to reset. If `launcher-data.json` can't be read, a copy is kept as `launcher-data.json.broken`.
 

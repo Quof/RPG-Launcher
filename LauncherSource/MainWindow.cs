@@ -1763,6 +1763,8 @@ internal sealed class MainWindow : Window
 
         bool rpgRt = !options.UseEasyRpg;
         root.DropDownItems.Add(Toggle("Use EasyRPG Player", options.UseEasyRpg, () => options.UseEasyRpg = !options.UseEasyRpg));
+        root.DropDownItems.Add(Toggle("EasyRPG for games without RPG_RT.exe", options.UseEasyRpg || options.EasyRpgFallback,
+            () => options.EasyRpgFallback = !options.EasyRpgFallback, !options.UseEasyRpg));
         root.DropDownItems.Add(Toggle("Start in a window", options.Window, () => options.Window = !options.Window));
         root.DropDownItems.Add(Toggle("Small window (RPG_RT)", options.SmallWindow, () => options.SmallWindow = !options.SmallWindow, rpgRt));
         root.DropDownItems.Add(Toggle("One CPU core (RPG_RT)", options.SingleCpu, () => options.SingleCpu = !options.SingleCpu, rpgRt));
@@ -1773,7 +1775,7 @@ internal sealed class MainWindow : Window
             $"Runtime folder: {(options.RuntimeFolder is null ? "automatic" : Path.GetFileName(options.RuntimeFolder.TrimEnd('\\', '/')))}…",
             (_, _) => _ = ChooseRuntimeFolderAsync()));
         root.DropDownItems.Add(Menus.Item(
-            $"EasyRPG Player: {(options.EasyRpgPath is null ? "automatic" : Path.GetFileName(options.EasyRpgPath))}…",
+            $"EasyRPG Player: {(options.EasyRpgPath is null ? "bundled" : Path.GetFileName(options.EasyRpgPath))}…",
             (_, _) => _ = ChooseEasyRpgAsync()));
         Menus.StyleSubmenu(root, owner, checks: true);
         return root;
@@ -2791,8 +2793,8 @@ internal sealed class MainWindow : Window
             _vip = new VipView(_store, _root, SaveData, Rm2kRuntimeSearch);
             _vip.ModeRequested += SetMode;
         }
-        Content = _vip;
-        Title = "VIPRPG 保管庫 — RPG Launcher";
+        Content = _vip.Host;
+        Title = "VIPRPG ランチャー — RPG Launcher";
         _vip.Start();
     }
 
@@ -3210,7 +3212,7 @@ internal sealed class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs e)
     {
-        if (_vip is not null && ReferenceEquals(Content, _vip)) return;
+        if (_vip is not null && ReferenceEquals(Content, _vip.Host)) return;
         bool control = e.KeyModifiers.HasFlag(KeyModifiers.Control);
         if (e.Key == Key.F5)
         {

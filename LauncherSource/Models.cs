@@ -397,6 +397,9 @@ internal sealed class Rm2kOptions
     /// <summary>Run games with EasyRPG Player instead of RPG_RT.exe.</summary>
     public bool UseEasyRpg { get; set; }
 
+    /// <summary>Use EasyRPG Player for games that have no RPG_RT.exe and no runtime folder to borrow one from.</summary>
+    public bool EasyRpgFallback { get; set; } = true;
+
     /// <summary>EasyRPG Player's program; null looks beside the launcher. A game's own copy is used first.</summary>
     public string? EasyRpgPath { get; set; }
 
@@ -419,15 +422,37 @@ internal sealed class VipData
     /// <summary>Last matsuri or author picked in the side list.</summary>
     public string? Selected { get; set; }
 
-    /// <summary>Times VIPRPG mode was opened: the visitor counter every matsuri site had.</summary>
-    public int Visitors { get; set; }
+    /// <summary>Where downloaded games go; null uses the first game folder.</summary>
+    public string? DownloadFolder { get; set; }
+
+    /// <summary>
+    /// Games downloaded from the server, so they stay matched whatever their folder is called: game folder (full
+    /// path) → the catalog work ("2005-kouhaku/01"), or the server path for games the catalog doesn't list.
+    /// </summary>
+    public Dictionary<string, string> Downloaded { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Favorite games, by key: "matsuri/No" for catalog works, "dl:" + archive path, "pc:" + folder, "zip:" + file.</summary>
+    public List<string> Favorites { get; set; } = new();
+
+    /// <summary>手持ち's order ("sort:title", "sort:recent"…) and filter ("show:all", "show:fav", "show:group:…", "show:engine:…").</summary>
+    public string OwnedSort { get; set; } = "sort:title";
+    public string OwnedFilter { get; set; } = "show:all";
+
+    /// <summary>The user's groups, in the order they were made.</summary>
+    public List<string> Groups { get; set; } = new();
+
+    /// <summary>Each game's groups, by the same keys as <see cref="Favorites"/>.</summary>
+    public Dictionary<string, List<string>> GroupMembers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 internal enum VipListMode
 {
     Matsuri,
     Author,
-    Owned
+    Owned,
+
+    /// <summary>Every game in one alphabetical list, narrowed to favorites or a group.</summary>
+    All
 }
 
 internal sealed class VipRecord

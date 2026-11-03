@@ -13,7 +13,13 @@ launcher-library.json
 launcher-library.json.tmp
 launcher-vip-library.json
 launcher-vip-library.json.tmp
+launcher-vip-server.json
+
+# The download server's files (uploaded to R2, not kept in git)
+viprpg-host/bucket/
+viprpg-host/.manifest-cache.json
 launcher-thumbnails/
 launcher-images/
 launcher-dlsite/
 vip-sozai/
+games/

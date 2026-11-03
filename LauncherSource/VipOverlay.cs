@@ -179,8 +179,11 @@ internal sealed class VipSettings : VipOverlay
     private readonly VipView _owner;
     private int _index;
 
-    public VipSettings(Rm2kOptions options, VipData data, Action save, Action rescan, VipView owner)
+    private readonly Action _switchMode;
+
+    public VipSettings(Rm2kOptions options, VipData data, Action save, Action rescan, VipView owner, Action switchMode)
     {
+        _switchMode = switchMode;
         _options = options;
         _data = data;
         _save = save;
@@ -195,8 +198,14 @@ internal sealed class VipSettings : VipOverlay
         bool rpgRt = !_options.UseEasyRpg;
         var entries = new List<Entry>
         {
-            new("起動に使うもの", () => _options.UseEasyRpg ? "EasyRPG Player" : "RPG_RT.exe",
-                "Run 2000/2003 games with their RPG_RT.exe, or with EasyRPG Player.", () => Toggle(() => _options.UseEasyRpg = !_options.UseEasyRpg)),
+            new("EasyRPGを使う", () => _options.UseEasyRpg ? "いつも" : _options.EasyRpgFallback ? "RPG_RT.exeがない時" : "使わない",
+                "EasyRPG Player (bundled): for every 2000/2003 game, only for games without RPG_RT.exe, or never.", () => Toggle(() =>
+                {
+                    // いつも → RPG_RT.exeがない時 → 使わない → いつも
+                    if (_options.UseEasyRpg) (_options.UseEasyRpg, _options.EasyRpgFallback) = (false, true);
+                    else if (_options.EasyRpgFallback) _options.EasyRpgFallback = false;
+                    else (_options.UseEasyRpg, _options.EasyRpgFallback) = (true, true);
+                })),
             new("ウィンドウ表示", () => OnOff(_options.Window),
                 "Start in a window instead of full screen.", () => Toggle(() => _options.Window = !_options.Window)),
             new("小さい画面で起動", () => OnOff(_options.SmallWindow),
@@ -208,10 +217,12 @@ internal sealed class VipSettings : VipOverlay
             new("ランタイム", () => _options.RuntimeFolder ?? "自動 (MoshimoLoaderを探す)",
                 "Folder with 2000\\RPG_RT.exe and 2003\\RPG_RT.exe for games shipped without one. Del resets to automatic.",
                 () => _ = PickRuntimeAsync()),
-            new("EasyRPG Player", () => _options.EasyRpgPath ?? "自動 (ランチャーの隣)",
-                "EasyRPG Player's program. A game's own Player.exe is used first. Del resets to automatic.",
+            new("EasyRPG Player", () => _options.EasyRpgPath ?? "同梱版 (EasyRPGフォルダ)",
+                "EasyRPG Player's program: the bundled one unless you choose another. A game's own Player.exe is used first. Del resets.",
                 () => _ = PickEasyRpgAsync())
         };
+        entries.Add(new Entry("ダウンロード先", () => _data.DownloadFolder ?? "自動 (ランチャーのgamesフォルダ)",
+            "Where downloaded games are saved and unpacked. Del resets to the games folder beside the launcher.", () => _ = PickDownloadFolderAsync()));
         foreach (string folder in _data.Directories.ToList())
         {
             entries.Add(new Entry("フォルダ", () => folder, "Enter removes this folder from VIPRPG mode (nothing is deleted).", () =>
@@ -221,6 +232,7 @@ internal sealed class VipSettings : VipOverlay
                 _rescan();
             }));
         }
+        entries.Add(new Entry("モード", () => "VIPRPG", "Enter switches to HRPG mode (the DLsite library).", _switchMode));
         entries.Add(new Entry("閉じる", () => "", "Close the settings.", _owner.CloseOverlay));
         return entries;
     }
@@ -244,6 +256,14 @@ internal sealed class VipSettings : VipOverlay
         string? file = await _owner.PickAsync(folder: false, "EasyRPG Player (Player.exe)");
         if (file is null) return;
         _options.EasyRpgPath = file;
+        _save();
+    }
+
+    private async Task PickDownloadFolderAsync()
+    {
+        string? folder = await _owner.PickAsync(folder: true, "ダウンロードしたゲームを置くフォルダ");
+        if (folder is null) return;
+        _data.DownloadFolder = folder;
         _save();
     }
 
@@ -291,8 +311,89 @@ internal sealed class VipSettings : VipOverlay
             case Key.Delete:
                 if (entries[_index].Label == "ランタイム") _options.RuntimeFolder = null;
                 else if (entries[_index].Label == "EasyRPG Player") _options.EasyRpgPath = null;
+                else if (entries[_index].Label == "ダウンロード先") _data.DownloadFolder = null;
                 _save();
                 break;
+            case Key.Escape or Key.X or Key.Back: return false;
+        }
+        return true;
+    }
+}
+
+/// <summary>A right-click menu: a small command window at the pointer, like RPG Maker's item command lists.</summary>
+internal sealed class VipMenu : VipOverlay
+{
+    /// <summary>A command; a null action is a heading line.</summary>
+    public sealed record Item(string Label, Action? Run, bool Enabled = true, bool Checked = false);
+
+    private readonly List<Item> _items;
+    private readonly Point _at;
+    private readonly Action _close;
+    private int _index;
+
+    public VipMenu(Point at, List<Item> items, Action close)
+    {
+        _at = at;
+        _items = items;
+        _close = close;
+        _index = Math.Max(0, items.FindIndex(item => item.Run is not null && item.Enabled));
+    }
+
+    public override void Paint(DrawingContext g, Size size, int tick, List<VipHot> hot, Point mouse)
+    {
+        double width = Math.Min(size.Width - 8, Math.Max(140, _items.Max(item => RetroDraw.Width(item.Label)) + 40));
+        double height = _items.Count * 16 + 16;
+        // Beside the pointer, kept on the canvas.
+        double x = Math.Clamp(_at.X + 4, 4, size.Width - width - 4);
+        double y = Math.Clamp(_at.Y - 8, 4, size.Height - height - 4);
+        Area = RetroDraw.Snap(new Rect(x, y, width, height));
+        RetroDraw.Window(g, Area);
+        for (int i = 0; i < _items.Count; i++)
+        {
+            var item = _items[i];
+            var row = new Rect(Area.X + 6, Area.Y + 8 + i * 16, Area.Width - 12, 16);
+            if (item.Run is null)
+            {
+                RetroDraw.Text(g, item.Label, row.X + 4, row.Y + 2, RetroDraw.System);
+                continue;
+            }
+            if (i == _index) RetroDraw.Cursor(g, row, tick);
+            else if (row.Contains(mouse) && item.Enabled) RetroDraw.Fill(g, row.Deflate(1), Color.FromArgb(40, 255, 255, 255));
+            string mark = item.Checked ? "\u2713" : "  ";
+            RetroDraw.Text(g, mark + item.Label, row.X + 4, row.Y + 2, item.Enabled ? RetroDraw.TextColor : RetroDraw.Disabled);
+            int index = i;
+            hot.Add(new VipHot(row, () =>
+            {
+                _index = index;
+                Choose();
+            }));
+        }
+    }
+
+    private void Choose()
+    {
+        var item = _items[_index];
+        if (item.Run is null || !item.Enabled) return;
+        _close();
+        item.Run();
+    }
+
+    private void Move(int delta)
+    {
+        for (int step = 0; step < _items.Count; step++)
+        {
+            _index = (_index + delta + _items.Count) % _items.Count;
+            if (_items[_index].Run is not null && _items[_index].Enabled) return;
+        }
+    }
+
+    public override bool OnKey(Key key)
+    {
+        switch (key)
+        {
+            case Key.Up: Move(-1); break;
+            case Key.Down: Move(1); break;
+            case Key.Enter or Key.Space or Key.Z: Choose(); break;
             case Key.Escape or Key.X or Key.Back: return false;
         }
         return true;

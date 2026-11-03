@@ -12,7 +12,7 @@ internal static class VipAssets
     private static readonly Dictionary<string, Bitmap?> Cache = new();
     private static List<string>? _rtp;
 
-    /// <summary>The folder for the user's own sozai: party.png, face.png, monster.png, system.png.</summary>
+    /// <summary>The folder for the user's own sozai: system.png.</summary>
     public static string SozaiFolder => Path.Combine(AppContext.BaseDirectory, "vip-sozai");
 
     /// <summary>RTP folders found on this PC, 2000 first.</summary>
