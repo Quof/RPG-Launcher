@@ -69,6 +69,19 @@ internal sealed class VipView : PixelCanvas
     private Rect _searchRect;
     private string _query = "";
 
+    // The author list's own search, sharing the one text box: which list the box is searching now, and a guard
+    // while its text is swapped between the two.
+    private string _sideQuery = "";
+    private bool _searchSide, _syncingSearch;
+
+    // The scroll bars beside the two lists, and the one being dragged by its thumb.
+    private Rect _sideBar, _rowsBar;
+    private Pane? _dragging;
+    private double _dragOffset;
+
+    // Each author's first game, shown while the pointer is over the author.
+    private readonly Dictionary<string, Row?> _authorFirst = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The screen to show: the canvas with the search box over it.</summary>
     public Control Host => _host;
 
@@ -151,6 +164,13 @@ internal sealed class VipView : PixelCanvas
         _search.VerticalContentAlignment = VerticalAlignment.Center;
         _search.TextChanged += (_, _) =>
         {
+            if (_syncingSearch) return;
+            if (_searchSide)
+            {
+                _sideQuery = (_search.Text ?? "").Trim();
+                RebuildSide();
+                return;
+            }
             _query = (_search.Text ?? "").Trim();
             _rowIndex = _rowTop = 0;
             RebuildRows();
@@ -165,7 +185,7 @@ internal sealed class VipView : PixelCanvas
             }
             else if (e.Key is Key.Enter or Key.Down)
             {
-                _focus = Pane.Rows;
+                if (!_searchSide) _focus = Pane.Rows;
                 Focus();
                 e.Handled = true;
             }
@@ -470,7 +490,12 @@ internal sealed class VipView : PixelCanvas
     private void SetList(VipListMode mode)
     {
         // Coming back to the same list keeps the matsuri or author that was chosen.
-        if (mode != Data.List) Data.Selected = null;
+        if (mode != Data.List)
+        {
+            Data.Selected = null;
+            _sideQuery = "";
+            if (_searchSide) SetSearchText("");
+        }
         Data.List = mode;
         _save();
         RebuildSide();
@@ -484,7 +509,8 @@ internal sealed class VipView : PixelCanvas
         {
             case VipListMode.Matsuri:
                 // Festivals only: everything else is in 保管庫.
-                foreach (var matsuri in _catalog.Matsuri)
+                // Newest first, and in order within a year (the catalog has a year's matsuri in name order).
+                foreach (var matsuri in _catalog.Matsuri.OrderByDescending(m => m.Year ?? 0).ThenByDescending(m => m.Month))
                     side.Add(new SideItem(matsuri.ShortName, matsuri.Works.Count(w => w.Local is not null), matsuri.Works.Count, matsuri, null, false));
                 break;
             case VipListMode.Storage:
@@ -527,7 +553,11 @@ internal sealed class VipView : PixelCanvas
                              .Select(group => (group.Key, group.SelectMany(entry => entry.Works).ToList()))
                              .OrderByDescending(entry => entry.Item2.Count)
                              .ThenBy(entry => entry.Key, StringComparer.CurrentCultureIgnoreCase))
+                {
+                    if (_sideQuery.Length > 0 && !Fold(author).Contains(Fold(_sideQuery))) continue;
                     side.Add(new SideItem(author, works.Count(w => w.Local is not null), works.Count, null, author, false));
+                }
+                _authorFirst.Clear();
                 break;
             default:
                 side.AddRange(OwnedSideItems());
@@ -1766,9 +1796,24 @@ internal sealed class VipView : PixelCanvas
             VipListMode.Storage => T("保管庫：保管庫を選んでね", "Thread Storage: pick an archive"),
             _ => T("手持ち：並べ替えか絞り込みを選んでね", "On This PC: pick a sort or filter")
         };
-        PaintHeading(g, heading, _listRect.Width - 16, back: true);
+        double headingWidth = _listRect.Width - 16;
+        if (Data.List == VipListMode.Author)
+        {
+            // The author list has its own search box, at the right of the heading like the works page's.
+            double searchWidth = Math.Min(200, Math.Floor(_listRect.Width * 0.42));
+            _searchRect = new Rect(_listRect.Right - 8 - searchWidth, _listRect.Y + 5, searchWidth, 15);
+            headingWidth -= searchWidth + 8;
+        }
+        PaintHeading(g, heading, headingWidth, back: true);
         var list = new Rect(_listRect.X + 6, _listRect.Y + 22, _listRect.Width - 12, _listRect.Height - 30);
         _sideVisible = Math.Max(1, (int)(list.Height / 16));
+        // A scroll bar at the right when the list is longer than the window.
+        _sideBar = default;
+        if (_side.Count > _sideVisible)
+        {
+            _sideBar = new Rect(list.Right - ScrollBarWidth, list.Y, ScrollBarWidth, _sideVisible * 16);
+            list = list.WithWidth(list.Width - ScrollBarWidth - 2);
+        }
         _sideTop = Math.Clamp(_sideTop, 0, Math.Max(0, _side.Count - _sideVisible));
         if (_sideIndex < _sideTop) _sideTop = _sideIndex;
         if (_sideIndex >= _sideTop + _sideVisible) _sideTop = _sideIndex - _sideVisible + 1;
@@ -1801,8 +1846,39 @@ internal sealed class VipView : PixelCanvas
                 _hot.Add(new VipHot(row, () => OpenSide(index)));
             }
         }
+        if (_side.Count == 0 && _sideQuery.Length > 0)
+            RetroDraw.Text(g, T("見つからない", "No matches"), list.X + 8, list.Y + 4, RetroDraw.Disabled);
         if (_sideTop > 0) RetroDraw.MoreArrow(g, _listRect.Center.X, _listRect.Y + 16, _tick, down: false);
         if (_sideTop + _sideVisible < _side.Count) RetroDraw.MoreArrow(g, _listRect.Center.X, _listRect.Bottom - 7, _tick);
+        PaintScrollBar(g, _sideBar, _sideTop, _sideVisible, _side.Count, Pane.Side);
+    }
+
+    private const double ScrollBarWidth = 6;
+
+    /// <summary>Where a scroll bar's thumb is: its size is the share of the list in view.</summary>
+    private static Rect ThumbOf(Rect bar, int top, int visible, int count)
+    {
+        double height = Math.Max(10, Math.Floor(bar.Height * visible / Math.Max(1, count)));
+        int range = Math.Max(1, count - visible);
+        return new Rect(bar.X, bar.Y + Math.Round((bar.Height - height) * Math.Clamp(top, 0, range) / range), bar.Width, height);
+    }
+
+    private void PaintScrollBar(DrawingContext g, Rect bar, int top, int visible, int count, Pane pane)
+    {
+        if (bar.Width <= 0) return;
+        RetroDraw.Fill(g, bar, Color.FromArgb(90, 0, 0, 0));
+        var thumb = ThumbOf(bar, top, visible, count);
+        bool hot = _dragging == pane || (bar.Contains(_mouse) && _overlay is null);
+        RetroDraw.Fill(g, thumb, hot ? Color.FromArgb(230, 255, 255, 255) : Color.FromArgb(150, 200, 210, 255));
+    }
+
+    /// <summary>The list's first line for a thumb dragged to this height.</summary>
+    private static int TopFor(Rect bar, double thumbY, int visible, int count)
+    {
+        var thumb = ThumbOf(bar, 0, visible, count);
+        double travel = bar.Height - thumb.Height;
+        int range = Math.Max(0, count - visible);
+        return travel <= 0 ? 0 : (int)Math.Round(Math.Clamp((thumbY - bar.Y) / travel, 0, 1) * range);
     }
 
     private void PaintRows(DrawingContext g, VipTheme theme)
@@ -1861,6 +1937,12 @@ internal sealed class VipView : PixelCanvas
 
         var list = new Rect(x, headerY + 18, width, _listRect.Bottom - headerY - 26);
         _rowsVisible = Math.Max(1, (int)(list.Height / 16));
+        _rowsBar = default;
+        if (_rows.Count > _rowsVisible)
+        {
+            _rowsBar = new Rect(list.Right - ScrollBarWidth, list.Y, ScrollBarWidth, _rowsVisible * 16);
+            list = list.WithWidth(list.Width - ScrollBarWidth - 2);
+        }
         _rowTop = Math.Clamp(_rowTop, 0, Math.Max(0, _rows.Count - _rowsVisible));
 
         if (_rows.Count == 0)
@@ -1930,15 +2012,18 @@ internal sealed class VipView : PixelCanvas
         // In the header line, between the column names, so it never covers the first game.
         if (_rowTop > 0) RetroDraw.MoreArrow(g, _listRect.Center.X, headerY + 8, _tick, down: false);
         if (_rowTop + _rowsVisible < _rows.Count) RetroDraw.MoreArrow(g, _listRect.Center.X, _listRect.Bottom - 7, _tick);
+        PaintScrollBar(g, _rowsBar, _rowTop, _rowsVisible, _rows.Count, Pane.Rows);
     }
 
     private void PaintDetail(DrawingContext g, VipTheme theme)
     {
         RetroDraw.Window(g, _detailRect, theme.WindowTop, theme.WindowBottom);
-        var row = SelectedRow;
         double x = _detailRect.X + 8, y = _detailRect.Y + 8, width = _detailRect.Width - 16;
         _pictureBitmap = null;
-        if (row is null || _focus != Pane.Rows) return;
+        // On the author list, the author under the pointer (or the keyboard cursor) previews their first game.
+        bool preview = _focus == Pane.Side;
+        var row = preview ? AuthorPreview() : _focus == Pane.Rows ? SelectedRow : null;
+        if (row is null) return;
 
         // Buttons first, so the picture can take the room the text and buttons leave.
         // Buttons, like a shop's command window.
@@ -1967,6 +2052,9 @@ internal sealed class VipView : PixelCanvas
             if (eventInfo.SiteUrl is { } site) buttons.Add((T("公式サイト", "Website"), () => OpenUrl(site), true));
             else if (eventInfo.WikiUrl is { } matsuriWiki) buttons.Add((T("祭りwiki", "Festival Wiki"), () => OpenUrl(matsuriWiki), true));
         }
+
+        // A preview is only to look at.
+        if (preview) buttons.Clear();
 
         // The picture: 4:3, as large as leaves room for six lines of text and the buttons.
         const int Columns = 4;
@@ -2051,6 +2139,23 @@ internal sealed class VipView : PixelCanvas
         }
     }
 
+    /// <summary>The first game of the author under the pointer, or under the keyboard cursor; null off the author list.</summary>
+    private Row? AuthorPreview()
+    {
+        if (Data.List != VipListMode.Author || _overlay is not null) return null;
+        int hovered = _sideAreas.FindIndex(area => area.Contains(_mouse));
+        int index = hovered >= 0 ? _sideTop + hovered : _keys ? _sideIndex : -1;
+        if (index < 0 || index >= _side.Count || _side[index].Author is not { } author) return null;
+        if (!_authorFirst.TryGetValue(author, out var first))
+        {
+            // The same first game the author's own page lists.
+            first = _catalog.Games.FirstOrDefault(w => string.Equals(AuthorLabel(w.Author), author, StringComparison.OrdinalIgnoreCase))
+                is { } work ? RowFor(work, Short(work.Event)) : null;
+            _authorFirst[author] = first;
+        }
+        return first;
+    }
+
     private static double Line(DrawingContext g, string label, string value, double x, double y, double width)
     {
         double labelWidth = RetroDraw.Text(g, label, x, y, RetroDraw.System) + 8;
@@ -2112,6 +2217,13 @@ internal sealed class VipView : PixelCanvas
         _search.IsVisible = _searchRect.Width > 0;
         if (_searchRect.Width > 0)
         {
+            bool side = _focus == Pane.Side;
+            if (side != _searchSide)
+            {
+                _searchSide = side;
+                SetSearchText(side ? _sideQuery : _query);
+                _search.Watermark = side ? T("作者を検索 (Ctrl+F)", "Search Authors (Ctrl+F)") : T("検索 (Ctrl+F)", "Search (Ctrl+F)");
+            }
             var rect = FromCanvas(_searchRect);
             var margin = new Thickness(Math.Round(rect.X), Math.Round(rect.Y), 0, 0);
             if (_search.Margin != margin) _search.Margin = margin;
@@ -2121,6 +2233,14 @@ internal sealed class VipView : PixelCanvas
             if (Math.Abs(_search.FontSize - font) > 0.5) _search.FontSize = font;
         }
         PlacePicture();
+    }
+
+    /// <summary>Sets the search box's text without searching again.</summary>
+    private void SetSearchText(string text)
+    {
+        _syncingSearch = true;
+        _search.Text = text;
+        _syncingSearch = false;
     }
 
     // A size not yet set is NaN, which no comparison would catch.
@@ -2172,7 +2292,52 @@ internal sealed class VipView : PixelCanvas
         var mouse = ToCanvas(e.GetPosition(this));
         if (mouse != _mouse) _keys = false;
         _mouse = mouse;
+        if (_dragging is { } pane) DragTo(pane, mouse.Y);
         Redraw();
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        if (_dragging is null) return;
+        _dragging = null;
+        e.Pointer.Capture(null);
+        Redraw();
+    }
+
+    /// <summary>Scrolls a list to where its thumb is dragged, without changing what's selected.</summary>
+    private void DragTo(Pane pane, double y)
+    {
+        if (pane == Pane.Side) _sideTop = TopFor(_sideBar, y - _dragOffset, _sideVisible, _side.Count);
+        else _rowTop = TopFor(_rowsBar, y - _dragOffset, _rowsVisible, _rows.Count);
+        KeepCursorsVisible();
+    }
+
+    /// <summary>A press on a scroll bar: grabs the thumb, or pages toward the press.</summary>
+    private bool PressScrollBar(Point point, PointerPressedEventArgs e)
+    {
+        foreach (var (pane, bar) in new[] { (Pane.Side, _sideBar), (Pane.Rows, _rowsBar) })
+        {
+            if (bar.Width <= 0 || pane != _focus || !bar.Inflate(new Thickness(2, 0)).Contains(point)) continue;
+            bool side = pane == Pane.Side;
+            int top = side ? _sideTop : _rowTop, visible = side ? _sideVisible : _rowsVisible, count = side ? _side.Count : _rows.Count;
+            var thumb = ThumbOf(bar, top, visible, count);
+            if (point.Y >= thumb.Y && point.Y < thumb.Bottom)
+            {
+                _dragging = pane;
+                _dragOffset = point.Y - thumb.Y;
+                e.Pointer.Capture(this);
+            }
+            else
+            {
+                top += point.Y < thumb.Y ? -visible : visible;
+                if (side) _sideTop = Math.Max(0, top);
+                else _rowTop = Math.Max(0, top);
+                KeepCursorsVisible();
+            }
+            return true;
+        }
+        return false;
     }
 
     protected override void OnPointerExited(PointerEventArgs e)
@@ -2231,6 +2396,12 @@ internal sealed class VipView : PixelCanvas
             return;
         }
         if (!properties.IsLeftButtonPressed) return;
+        if (_overlay is null && PressScrollBar(point, e))
+        {
+            e.Handled = true;
+            Redraw();
+            return;
+        }
         // Topmost first: the overlay's areas were added last.
         for (int i = _hot.Count - 1; i >= 0; i--)
         {
@@ -2296,8 +2467,8 @@ internal sealed class VipView : PixelCanvas
             case Key.Enter or Key.Space or Key.Z: Confirm(); break;
             case Key.Escape or Key.X or Key.Back: Back(); break;
             case Key.F when e.KeyModifiers.HasFlag(KeyModifiers.Control):
-                // The search box belongs to the works page.
-                _focus = Pane.Rows;
+                // The search box belongs to the works page, and to the author list.
+                if (!(_focus == Pane.Side && Data.List == VipListMode.Author)) _focus = Pane.Rows;
                 Redraw();
                 Dispatcher.UIThread.Post(() => _search.Focus(), DispatcherPriority.Background);
                 break;

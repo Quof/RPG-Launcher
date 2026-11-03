@@ -27,6 +27,47 @@ internal sealed class VipMatsuri
     [JsonIgnore]
     public string ShortName => Regex.Replace(Name, @"^\s*VIPRPG(?:\s*ツクール)?[\s　-]*", "").Trim() is { Length: > 0 } rest ? rest : Name;
 
+    /// <summary>
+    /// When in its year it was held, to list a year's matsuri in order: the start month of its period, else its
+    /// season (GW in May, 夏の陣 in August, 紅白 in December). Specials go where the wiki's 祭り table
+    /// (w.atwiki.jp/vip_rpg/pages/502.html) puts them among that year's festivals.
+    /// </summary>
+    [JsonIgnore]
+    public int Month
+    {
+        get
+        {
+            if (Period is { } period && Regex.Match(period, @"^\d{4}/(\d{1,2})/") is { Success: true } start) return int.Parse(start.Groups[1].Value);
+            if (SpecialMonths.TryGetValue(Id, out int month)) return month;
+            string text = (Type ?? "") + " " + Id + " " + Name;
+            if (Regex.IsMatch(text, "kouhaku|紅白", RegexOptions.IgnoreCase)) return 12;
+            if (Regex.IsMatch(text, "summer|夏", RegexOptions.IgnoreCase)) return 8;
+            if (Regex.IsMatch(text, "gw", RegexOptions.IgnoreCase)) return 5;
+            return 0;
+        }
+    }
+
+    // Each special's place in its year, from the wiki's table: before 紅白 is 13, between 紅白 and 夏 is 9–11,
+    // between 夏 and GW is 6, after GW is 3–4.
+    private static readonly Dictionary<string, int> SpecialMonths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["2024-kuradashifestival"] = 10,
+        ["2023-winter"] = 13,
+        ["2018-gw-2"] = 4,
+        ["2016-summer-2"] = 7,
+        ["2014-tsukusure-festival"] = 10,
+        ["2012-toppuu-festival"] = 10,
+        ["2012-magic-festival"] = 3,
+        ["2011-toppatsu-festival"] = 10,
+        ["2011-denpa-game-festival"] = 6,
+        ["2009-silver-week-miruge-festival"] = 9,
+        ["2009-ksgfestival"] = 3,
+        ["2008-jisaku-battle-festival"] = 11,
+        ["2008-seiyoku-festival"] = 10,
+        ["2008-chuuni-festival"] = 3,
+        ["2007-default-battle-festival"] = 6,
+    };
+
     /// <summary>The works entered in it, in entry order.</summary>
     [JsonIgnore] public List<VipWork> Works { get; } = new();
 }

@@ -246,9 +246,21 @@ internal sealed class MainWindow : Window
         var leftovers = rm2k.Borrowed.ToList();
         var search = Rm2kRuntimeSearch().ToList();
         if (leftovers.Count > 0) _ = Task.Run(() => Rm2kLauncher.CleanUp(rm2k, leftovers, search));
-        if (_store.Data.Mode == LauncherMode.Vip) ShowVipMode();
+        if (_store.IsNew && _screenshot is null) _ = StartFirstTimeAsync();
+        else if (_store.Data.Mode == LauncherMode.Vip) ShowVipMode();
         else StartLibrary();
         if (_screenshot is not null) _ = CaptureScreenshotAsync(_screenshot);
+    }
+
+    /// <summary>The first start in a folder asks what the launcher is for, and opens in that mode.</summary>
+    private async Task StartFirstTimeAsync()
+    {
+        var dialog = new FirstModeDialog();
+        await dialog.ShowAsync(this);
+        _store.Data.Mode = dialog.Mode;
+        SaveData();
+        if (dialog.Mode == LauncherMode.Vip) ShowVipMode();
+        else StartLibrary();
     }
 
     /// <summary>Development aid (--screenshot path): saves the window once the library has loaded, then closes.</summary>

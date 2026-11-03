@@ -137,3 +137,46 @@ internal static class MessageDialog
         }
     }
 }
+
+/// <summary>Asked on the launcher's first start: which games it's for, which picks the mode it opens in.</summary>
+internal sealed class FirstModeDialog : DialogWindow
+{
+    private const double Pad = 22;
+    private const double ButtonWidth = 150;
+    private const double ButtonHeight = 40;
+    private const double Gap = 10;
+
+    /// <summary>The answer; HRPG unless VIPRPGs was chosen (closing the window keeps HRPG).</summary>
+    public LauncherMode Mode { get; private set; } = LauncherMode.Hrpg;
+
+    public FirstModeDialog()
+    {
+        Title = "RPG Launcher";
+        var question = Ui.Label("What are you using this for?", Look.Font(12, bold: true), Look.Text);
+        var note = Ui.Paragraph("何に使いますか？ You can switch modes later.",
+            Look.Font(9), Look.TextDim);
+        var hrpg = new PillButton { Text = "DLsite HRPGs", Checked = true };
+        var vip = new PillButton { Text = "VIPRPGs" };
+        hrpg.Click += (_, _) => Choose(LauncherMode.Hrpg);
+        vip.Click += (_, _) => Choose(LauncherMode.Vip);
+        Body.Children.Add(question);
+        Body.Children.Add(note);
+        Body.Children.Add(hrpg);
+        Body.Children.Add(vip);
+        SetClientSize(Pad * 2 + ButtonWidth * 2 + Gap + 40, Pad + 28 + 24 + 14 + ButtonHeight + Pad);
+        Body.Layout = size =>
+        {
+            Body.Place(question, Pad, Pad, size.Width - Pad * 2, 24);
+            Body.Place(note, Pad, Pad + 30, size.Width - Pad * 2, 22);
+            double left = (size.Width - ButtonWidth * 2 - Gap) / 2, top = size.Height - Pad - ButtonHeight;
+            Body.Place(hrpg, left, top, ButtonWidth, ButtonHeight);
+            Body.Place(vip, left + ButtonWidth + Gap, top, ButtonWidth, ButtonHeight);
+        };
+    }
+
+    private void Choose(LauncherMode mode)
+    {
+        Mode = mode;
+        Accept();
+    }
+}

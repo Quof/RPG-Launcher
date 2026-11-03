@@ -20,6 +20,9 @@ internal sealed class LauncherStore
     public LauncherData Data { get; private set; } = new();
     public string? LoadWarning { get; set; }
 
+    /// <summary>True when there was no launcher-data.json yet: the launcher's first start in this folder.</summary>
+    public bool IsNew { get; private set; }
+
     public LauncherStore(string filePath)
     {
         FilePath = filePath;
@@ -32,6 +35,7 @@ internal sealed class LauncherStore
             if (!File.Exists(FilePath))
             {
                 Data = new LauncherData();
+                IsNew = true;
                 return;
             }
 
