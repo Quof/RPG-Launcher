@@ -438,6 +438,24 @@ internal sealed class VipData
     public string OwnedSort { get; set; } = "sort:title";
     public string OwnedFilter { get; set; } = "show:all";
 
+    /// <summary>Matsuri ("matsuri:2025-kouhaku") and authors ("author:たんち") kept at the top of their lists, in pin order.</summary>
+    public List<string> Pinned { get; set; } = new();
+
+    /// <summary>Authors the user counts as one (pseudonyms), each list shown as "A + B"; the catalog is unchanged.</summary>
+    public List<List<string>> AuthorLinks { get; set; } = new();
+
+    /// <summary>Games marked completed (クリア済み), by the same keys as favorites.</summary>
+    public List<string> Completed { get; set; } = new();
+
+    /// <summary>False hides completed games from every list (設定 → クリア済みの作品).</summary>
+    public bool ShowCompleted { get; set; } = true;
+
+    /// <summary>True shows the launcher's own words in English (設定 → 言語); game data is never translated.</summary>
+    public bool English { get; set; }
+
+    /// <summary>Playlists: named lists of games in the user's order, shareable as a code.</summary>
+    public List<VipPlaylist> Playlists { get; set; } = new();
+
     /// <summary>The user's groups, in the order they were made.</summary>
     public List<string> Groups { get; set; } = new();
 
@@ -452,7 +470,20 @@ internal enum VipListMode
     Owned,
 
     /// <summary>Every game in one alphabetical list, narrowed to favorites or a group.</summary>
-    All
+    All,
+
+    /// <summary>The user's playlists.</summary>
+    Playlist,
+
+    /// <summary>保管庫: the thread and wiki storage uploaders' games, and games only on this PC.</summary>
+    Storage
+}
+
+/// <summary>A playlist: its name and its games, by the same keys as favorites ("2010-kouhaku/091", "dl:…").</summary>
+internal sealed class VipPlaylist
+{
+    public string Name { get; set; } = "";
+    public List<string> Games { get; set; } = new();
 }
 
 internal sealed class VipRecord

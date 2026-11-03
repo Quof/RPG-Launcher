@@ -6,8 +6,15 @@ namespace RpgLauncher;
 
 /// <summary>
 /// Turns a work's original download link (as the matsuri listed it) into a file to download: a free itch.io game,
-/// a Google Drive file, or a file saved on the Wayback Machine. Other hosts (MEGA, Yahoo Box…) open in the browser.
+/// a Google Drive file, a getuploader upload, or a file saved on the Wayback Machine. Other hosts (MEGA, Yahoo Box…)
+/// open in the browser.
 /// </summary>
+/// <summary>An upload needs a download password, or the one given was wrong.</summary>
+internal sealed class PasswordRequiredException(bool wrong) : Exception(wrong ? "The download password was wrong." : "This upload needs a download password.")
+{
+    public bool Wrong { get; } = wrong;
+}
+
 internal static class VipOriginal
 {
     private static readonly Regex CsrfRegex = new("name=\"csrf_token\" value=\"([^\"]+)\"", RegexOptions.Compiled);
@@ -15,6 +22,10 @@ internal static class VipOriginal
     private static readonly Regex UploadNameRegex = new(@"class=""name"" title=""([^""]*)""", RegexOptions.Compiled);
     private static readonly Regex DriveIdRegex = new(@"(?:[?&]id=|/d/)([A-Za-z0-9_\-]{20,})", RegexOptions.Compiled);
     private static readonly Regex WaybackRegex = new(@"^https?://web\.archive\.org/web/([0-9]+)(?:[a-z_]*)/(.+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex UploaderPageRegex = new(@"^/[^/]+/download/[0-9]+(?:/[^/]*)?/?$", RegexOptions.Compiled);
+    private static readonly Regex UploaderPasswordRegex = new("type=\"password\" name=\"password\"", RegexOptions.Compiled);
+    private static readonly Regex UploaderTokenRegex = new(@"name=""token"" value=""([^""]+)""", RegexOptions.Compiled);
+    private static readonly Regex UploaderFileRegex = new(@"https://download[a-z0-9]*\.getuploader\.com/g/[^""'<>\s]+", RegexOptions.Compiled);
     private static readonly string[] ArchiveExtensions = { ".zip", ".rar", ".7z", ".lzh", ".exe" };
 
     /// <summary>True when the launcher can download from this link itself.</summary>
@@ -26,6 +37,7 @@ internal static class VipOriginal
         string host = uri.Host.ToLowerInvariant();
         if (host.EndsWith(".itch.io", StringComparison.Ordinal) && uri.AbsolutePath.Trim('/').Length > 0) return "itch";
         if (host is "drive.google.com" or "drive.usercontent.google.com" && DriveIdRegex.IsMatch(url!)) return "drive";
+        if (host.EndsWith(".getuploader.com", StringComparison.Ordinal) && UploaderPageRegex.IsMatch(uri.AbsolutePath)) return "uploader";
         if (host == "web.archive.org" && WaybackRegex.Match(url!) is { Success: true } wayback &&
             ArchiveExtensions.Any(ext => wayback.Groups[2].Value.Split('?')[0].EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
             return "wayback";
@@ -33,13 +45,15 @@ internal static class VipOriginal
     }
 
     /// <summary>The direct file address and its name (when known) behind a work's original link.</summary>
-    public static async Task<(string Url, string? FileName)> ResolveAsync(string url, CancellationToken token)
+    public static async Task<(string Url, string? FileName)> ResolveAsync(string url, CancellationToken token, string? password = null)
     {
         url = url.Trim();
         switch (Kind(url))
         {
             case "itch":
                 return await ResolveItchAsync(url, token);
+            case "uploader":
+                return await ResolveUploaderAsync(url, password, token);
             case "drive":
                 string id = DriveIdRegex.Match(url).Groups[1].Value;
                 // confirm=t skips the "can't scan this large file for viruses" page.
@@ -52,6 +66,45 @@ internal static class VipOriginal
             default:
                 throw new NotSupportedException("The launcher can't download from this site.");
         }
+    }
+
+    /// <summary>
+    /// A getuploader upload: its page's ダウンロード button posts a one-time token back to the page, which answers with
+    /// the file's own address. Deleted and password-protected uploads have no such button.
+    /// </summary>
+    private static async Task<(string Url, string? FileName)> ResolveUploaderAsync(string page, string? password, CancellationToken token)
+    {
+        using var handler = new HttpClientHandler { CookieContainer = new CookieContainer(), AutomaticDecompression = DecompressionMethods.All };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (RPG Launcher)");
+        string html = await client.GetStringAsync(page, token);
+
+        async Task<string> Post(Dictionary<string, string> fields)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, page) { Content = new FormUrlEncodedContent(fields) };
+            request.Headers.Referrer = new Uri(page);
+            using var response = await client.SendAsync(request, token);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsStringAsync(token);
+        }
+
+        // A download password (often the matsuri's own, given on its page or in the thread) comes first.
+        if (UploaderPasswordRegex.IsMatch(html))
+        {
+            if (string.IsNullOrEmpty(password)) throw new PasswordRequiredException(wrong: false);
+            html = await Post(new Dictionary<string, string> { ["password"] = password, ["yes"] = "認証" });
+            if (UploaderPasswordRegex.IsMatch(html)) throw new PasswordRequiredException(wrong: true);
+        }
+        if (UploaderFileRegex.Match(html) is not { Success: true } link)
+        {
+            string formToken = UploaderTokenRegex.Match(html) is { Success: true } m ? m.Groups[1].Value
+                : throw new NotSupportedException("This uploader page has no download button: the file may have been deleted.");
+            html = await Post(new Dictionary<string, string> { ["token"] = formToken, ["yes"] = "ダウンロード" });
+            link = UploaderFileRegex.Match(html);
+            if (!link.Success) throw new InvalidDataException("The uploader didn't give the file's address.");
+        }
+        string direct = WebUtility.HtmlDecode(link.Value);
+        return (direct, Uri.UnescapeDataString(direct.Split('?')[0].Split('/')[^1]));
     }
 
     /// <summary>The extension a downloaded file's first bytes say it is (.zip, .rar, .7z, .lzh, .exe), or .bin.</summary>

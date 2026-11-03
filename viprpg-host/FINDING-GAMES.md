@@ -1,7 +1,7 @@
 # Finding the games the launcher can't download
 
 `vip-hunt.csv` (in the launcher folder) lists every matsuri work the launcher has no download for: not in the uploader
-archive, and no original link it can fetch (free itch.io, Google Drive, Wayback Machine). Each copy you find and upload
+archive, and no original link it can fetch (free itch.io, getuploader, Google Drive, Wayback Machine). Each copy you find and upload
 here gets a ↓ in every launcher within about five minutes.
 
 ## The sheet

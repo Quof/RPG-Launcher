@@ -28,11 +28,17 @@ internal sealed class VipServerGame
     public string? Url { get; set; }
     public string? Md5 { get; set; }
 
-    /// <summary>A work's original link (itch.io, Google Drive…), resolved to a file when downloaded.</summary>
-    public bool Original => Source == "original";
+    /// <summary>
+    /// A link resolved to a file when downloaded: the work's original link (itch.io, Google Drive…), or "live", a file
+    /// the archive didn't keep, from the uploader itself.
+    /// </summary>
+    public bool Original => Source is "original" or "live";
 
     /// <summary>The uploader archive's area the file came from, for listing games the catalog doesn't know.</summary>
     public string? Area { get; set; }
+
+    /// <summary>The archive's section for that area ("Wiki", "主帖用上传区"…), to group the 保管庫 list.</summary>
+    public string? Section { get; set; }
 
     /// <summary>The catalog work it is ("2005-kouhaku/01"), or null for games the catalog doesn't list.</summary>
     public string? WorkKey => string.IsNullOrWhiteSpace(Matsuri) || string.IsNullOrWhiteSpace(No) ? null : VipServer.Key(Matsuri, No);

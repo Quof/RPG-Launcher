@@ -25,7 +25,7 @@ internal sealed class VipUpload
                           !VipUploader.NotGameName.IsMatch(System.IO.Path.GetFileNameWithoutExtension(Name));
 
     /// <summary>A patch or fix rather than the game itself, going by its name or its upload area.</summary>
-    public bool IsPatch => VipUploader.PatchName.IsMatch(Name) || VipUploader.PatchArea.IsMatch(Area.Id) ||
+    public bool IsPatch => VipUploader.PatchName.IsMatch(System.IO.Path.GetFileNameWithoutExtension(Name)) || VipUploader.PatchArea.IsMatch(Area.Id) ||
                            (VipUploader.FixName.IsMatch(Name) && Size < 2_000_000);
 }
 
@@ -39,6 +39,14 @@ internal sealed class VipUploadArea
 
     /// <summary>The matsuri this area served, when its label names one.</summary>
     public VipMatsuri? Matsuri { get; set; }
+
+    /// <summary>
+    /// A matsuri's own uploader (its section label starts with the year, "2010 夏之阵"), even one the catalog has no
+    /// matsuri for. Its works are the matsuri's entries; what's left over is patches and re-uploads.
+    /// </summary>
+    public bool Festival => Matsuri is not null || FestivalLabel.IsMatch(Label);
+
+    private static readonly Regex FestivalLabel = new(@"^\s*(?:19|20)[0-9]{2}\b", RegexOptions.Compiled);
 }
 
 /// <summary>
@@ -50,18 +58,21 @@ internal sealed class VipUploader
     public const string Item = "VIPRPG-uploaderjp-Archive";
 
     // Patch files ("no28パッチ2.zip", "差分", "fix") and patch areas ("vipkouhaku2024_patch", "kh2015p", "vipsum_p").
-    internal static readonly Regex PatchName = new(@"パッチ|patch|差分|(?<![a-z])fix(?![a-z])",
+    // Also map fixes ("45no1map改.zip") and patch-suffixed numbers ("No.094p.zip").
+    internal static readonly Regex PatchName = new(@"パッチ|patch|差分|(?<![a-z])fix(?![a-z])|(?<![a-z])map(?![a-z])|[0-9]map|(?<=[0-9])p$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     // Saves, music, maps and materials ("セーブ1.zip", "Save01", "Music.zip", "Map0020.zip", "素材.zip").
     internal static readonly Regex NotGameName = new(@"セーブ|^save[0-9]*$|^music$|^bgm$|^map[0-9]+$|^system[0-9]*$|素材|^manual$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     // Fixes ("ネクロ修正.zip", "Legacy_hotfix1"): patches when small, a whole fixed release otherwise.
-    internal static readonly Regex FixName = new(@"修正|修復|hotfix", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    internal static readonly Regex FixName = new(@"修正|修復|hotfix|s(?:y|h)uu?sei", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     internal static readonly Regex PatchArea = new(@"patch|_p[0-9]*$|[0-9]p$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex YearRegex = new(@"(?<![0-9])(20[0-2][0-9])(?![0-9])", RegexOptions.Compiled);
     // Entry numbers in file names: "No.39 えあわせ", "URAsummer2016-no26" (strong); "vipgw17_08", "n04v02", "game52" (weak).
-    private static readonly Regex StrongNumber = new(@"(?<![a-z])no\.?\s*0*(?<no>[0-9]{1,3})(?![0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex StrongNumber = new(@"(?:(?<![a-z])|(?<=teisyutu|teisyutsu|sakuhin))no\.?\s*0*(?<no>[0-9]{1,3})(?![0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Dates in names ("007_11_01_12", "LAM差分20101228") aren't entry numbers.
+    private static readonly Regex DateText = new(@"(?<![0-9])(?:[0-9]{2}[_\-.][0-9]{2}[_\-.][0-9]{2}|20[0-9]{6})(?![0-9])", RegexOptions.Compiled);
     private static readonly Regex WeakNumber = new(@"(?:[_#\-\s　]|^|(?<![a-z])n|^game|^entry)0*(?<no>[0-9]{1,3})(?![0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex VersionText = new(@"v(?:er)?\.?\s*[0-9]+(?:[.\-_][0-9]+)*[a-z]?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -92,7 +103,9 @@ internal sealed class VipUploader
                         Area = area,
                         Id = file[0].GetInt32(),
                         Name = file[1].GetString() ?? "",
-                        Extension = file[2].ValueKind == JsonValueKind.String ? file[2].GetString() : null,
+                        // Files the archive didn't keep have no type recorded; their name still says it.
+                        Extension = file[2].ValueKind == JsonValueKind.String ? file[2].GetString()
+                            : Path.GetExtension(file[1].GetString() ?? "").TrimStart('.') is { Length: > 0 } ext ? ext.ToLowerInvariant() : null,
                         Size = file[3].ValueKind == JsonValueKind.Number ? file[3].GetInt64() : 0,
                         Md5 = file[4].ValueKind == JsonValueKind.String ? file[4].GetString() : null,
                         Comment = file[5].ValueKind == JsonValueKind.String ? file[5].GetString() : null,
@@ -137,7 +150,7 @@ internal sealed class VipUploader
     }
 
     /// <summary>The best archived download for a work: a game file from its matsuri's areas, by entry number or title.</summary>
-    public VipUpload? FindFor(VipWork work)
+    public VipUpload? FindFor(VipWork work, bool hosted = true, ISet<VipUpload>? taken = null)
     {
         if (work.Event is not { } matsuri) return null;
         VipUpload? best = null;
@@ -145,8 +158,9 @@ internal sealed class VipUploader
         foreach (var area in Areas.Where(a => a.Matsuri == matsuri))
         {
             // Only files the archive kept: an unhosted best match would leave the work with nothing.
-            foreach (var file in area.Files.Where(f => f.Hosted))
+            foreach (var file in area.Files.Where(f => f.Hosted == hosted))
             {
+                if (taken?.Contains(file) == true) continue;
                 int score = Score(work, file);
                 if (score == 0) continue;
                 // Later uploads replace earlier ones (fixed versions).
@@ -171,16 +185,36 @@ internal sealed class VipUploader
         string name = file.Name + " " + file.Comment;
         // Version numbers ("Ver1-4", "v1.21") aren't entry numbers.
         // NFKC first, so "№29" reads as "No29" and full-width digits as digits.
-        string stem = VersionText.Replace(Path.GetFileNameWithoutExtension(file.Name).Normalize(System.Text.NormalizationForm.FormKC), " ");
+        string stem = DateText.Replace(VersionText.Replace(Path.GetFileNameWithoutExtension(file.Name).Normalize(System.Text.NormalizationForm.FormKC), " "), " ");
         if (no is not null)
         {
             if (StrongNumber.Matches(stem).Any(m => int.Parse(m.Groups["no"].Value) == no)) score += 10;
-            else if (WeakNumber.Matches(stem).Any(m => int.Parse(m.Groups["no"].Value) == no)) score += 6;
+            // Only the first loose number: later ones are versions ("sakuhin_114_2" is entry 114's second upload).
+            else if (WeakNumber.Match(stem) is { Success: true } weak && int.Parse(weak.Groups["no"].Value) == no &&
+                     !NamesOtherGame(stem, title)) score += 6;
         }
         string key = VipCatalog.TitleKey(name);
         if (title.Length >= 3 && key.Contains(title)) score += 12;
         return score;
     }
+
+    // Words in file names that say nothing about which game it is: matsuri names, "game", "entry", "sakuhin"…
+    private static readonly Regex NameWords = new(@"[a-z]{3,}|[^\x00-\x7F0-9]{2,}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly HashSet<string> MatsuriWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "vip", "viprpg", "rpg", "kohaku", "kouhaku", "kouhaku", "summer", "natsu", "natu", "natunozin", "natsunojin",
+        "natunojin", "sakuhin", "game", "entry", "ver", "final", "ura", "gw", "matsuri", "tkool",
+        "紅白", "夏", "夏の陣", "作品", "祭り", "祭", "提出", "提出用", "本体", "完成版", "修正版", "体験版", "最新版"
+    };
+
+    /// <summary>
+    /// True when a file's name carries a word of its own (not a matsuri word) that isn't in the work's title:
+    /// "EMPIRE_003" is the EMPIRE game's version 003, not entry 003.
+    /// </summary>
+    private static bool NamesOtherGame(string stem, string titleKey) =>
+        NameWords.Matches(stem).Select(m => m.Value).Any(word =>
+            !MatsuriWords.Contains(word) && !MatsuriPrefix.IsMatch(word.ToLowerInvariant()) &&
+            !titleKey.Contains(VipCatalog.TitleKey(word), StringComparison.Ordinal));
 
     /// <summary>True for an https link on archive.org, where the uploader archive keeps its files.</summary>
     public static bool IsArchiveUrl(string url) =>
@@ -197,8 +231,8 @@ internal sealed class VipUploader
         var used = new HashSet<VipUpload>();
         foreach (var work in catalog.Games)
         {
-            if (string.IsNullOrWhiteSpace(work.No) || FindFor(work) is not { } file) continue;
-            used.Add(file);
+            // A file is one work's: a work whose best file is taken gets its next best.
+            if (string.IsNullOrWhiteSpace(work.No) || FindFor(work, taken: used) is not { } file || !used.Add(file)) continue;
             games.Add(Game(file, work));
         }
         // Files still unclaimed in a matsuri's uploaders, for works still without one, by a looser title match.
@@ -227,10 +261,20 @@ internal sealed class VipUploader
             if (!file.Hosted || !file.IsGame || file.IsPatch || used.Contains(file)) continue;
             if (ExactMatch(file, byTitle) is not { } work) continue;
             used.Add(file);
+            matched.Add(work);
             byTitle.Remove(VipCatalog.TitleKey(work.Title));
             games.Add(Game(file, work));
         }
-        foreach (var area in Areas)
+        // Works whose only match is a file the archive didn't keep: many are still on the live uploader.
+        foreach (var work in catalog.Games)
+        {
+            if (string.IsNullOrWhiteSpace(work.No) || matched.Contains(work) || FindFor(work, hosted: false, taken: used) is not { } file ||
+                !used.Add(file)) continue;
+            games.Add(Live(file, work));
+        }
+        // The thread and wiki storage uploaders' other games. A matsuri uploader's unclaimed files are left out: they
+        // are its patches, extra copies and re-uploads, not games of their own.
+        foreach (var area in Areas.Where(a => !a.Festival))
         {
             foreach (var file in area.Files)
             {
@@ -246,7 +290,7 @@ internal sealed class VipUploader
         RegexOptions.Compiled);
 
     // Leading years and matsuri words in file names ("2024紅白_金リカ2V4"), dropped before comparing titles.
-    private static readonly Regex MatsuriPrefix = new(@"^(?:20[0-9]{2}|vip|rpg|紅白|夏|gw|kouhaku|summer)+", RegexOptions.Compiled);
+    private static readonly Regex MatsuriPrefix = new(@"^(?:20[0-9]{2}|vip|rpg|紅白|夏|gw|kouhaku|kohaku|summer|natsu|natu|ura|sun|sum)+", RegexOptions.Compiled);
 
     /// <summary>
     /// The one work whose title holds a file's name, letter by letter in order ("もしも紅葉雪降り" in
@@ -298,6 +342,26 @@ internal sealed class VipUploader
         return previous[b.Length];
     }
 
+    /// <summary>A work's file as it still is on getuploader, fetched through its download page at download time.</summary>
+    private static VipServerGame Live(VipUpload file, VipWork work) => new()
+    {
+        Path = $"live/{file.Area.Id}/{file.Id}",
+        Url = $"https://ux.getuploader.com/{file.Area.Id}/download/{file.Id}",
+        Size = file.Size,
+        Md5 = file.Md5,
+        Area = file.Area.Id,
+        Source = "live",
+        Matsuri = work.Matsuri,
+        No = work.No,
+        Title = work.Title,
+        Author = work.Author,
+        Thread = file.Area.Title,
+        Section = file.Area.Label,
+        Year = file.Area.Matsuri?.Year,
+        Engine = work.Engine,
+        Note = file.Comment
+    };
+
     private static VipServerGame Game(VipUpload file, VipWork? work) => new()
     {
         Path = $"{file.Area.Id}/{file.Id:D6}.{file.Extension}",
@@ -311,6 +375,7 @@ internal sealed class VipUploader
         Title = work?.Title ?? System.IO.Path.GetFileNameWithoutExtension(file.Name),
         Author = work?.Author,
         Thread = file.Area.Title,
+        Section = file.Area.Label,
         Year = file.Area.Matsuri?.Year,
         Engine = work?.Engine,
         Note = file.Comment

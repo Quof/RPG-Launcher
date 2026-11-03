@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Avalonia.Platform.Storage;
+using static RpgLauncher.VipText;
 
 namespace RpgLauncher;
 
@@ -16,12 +17,16 @@ internal sealed class VipView : PixelCanvas
         string? Area = null, string? Filter = null);
 
     private sealed record Row(VipWork? Work, GameEntry? Local, string No, string Title, string Author, string? Zip = null,
-        VipServerGame? Remote = null);
+        VipServerGame? Remote = null, string? Missing = null);
 
     /// <summary>The download server: the R2 bucket's public address, where manifest.json is.</summary>
     private const string ServerAddress = "https://dl.viprpg-archive.com";
 
-    private sealed record Command(string Label, string Hint, string HintEn, Action Run, VipListMode? Mode = null);
+    private sealed record Command(string LabelJa, string LabelEn, string HintJa, string HintEn, Action Run, VipListMode? Mode = null)
+    {
+        public string Label => T(LabelJa, LabelEn);
+        public string Hint => T(HintJa, HintEn);
+    }
 
     /// <summary>Asks the window to switch modes (the "Mode: VIPRPG" command).</summary>
     public event Action<LauncherMode>? ModeRequested;
@@ -45,6 +50,9 @@ internal sealed class VipView : PixelCanvas
     private readonly List<Command> _tools;
     private readonly List<Rect> _rowAreas = new();
     private readonly List<Rect> _sideAreas = new();
+
+    /// <summary>For each game line in <see cref="_rowAreas"/>, where its words were drawn.</summary>
+    private readonly List<List<Rect>> _rowWords = new();
 
     // The search box over the works window: a real text box, so Japanese input works.
     private readonly TextBox _search = new();
@@ -70,11 +78,17 @@ internal sealed class VipView : PixelCanvas
     private bool _extracting;
     private List<SideItem> _side = new();
     private List<Row> _rows = new();
+
+    /// <summary>Completed games and all games in the list shown, for the "Completed: X/Y" in its heading.</summary>
+    private (int Done, int Total) _completedCount;
     // The left window shows one of three pages: the list modes, a mode's matsuri/authors/filters, or the works.
     private Pane _focus = Pane.Commands;
     private int _command, _sideIndex, _sideTop, _rowIndex, _rowTop;
     private int _sideVisible = 1, _rowsVisible = 1;
     private bool _scanning, _started, _loadingCache;
+
+    // True after a key press, false once the mouse moves: the matsuri list shows its cursor only to the keyboard.
+    private bool _keys;
     private int _tick;
     private string _say = "", _sayEn = "";
     private VipOverlay? _overlay;
@@ -92,6 +106,9 @@ internal sealed class VipView : PixelCanvas
     private long _downloaded;
     private CancellationTokenSource? _downloadCancel;
 
+    // Download passwords given for getuploader uploaders this session, by uploader.
+    private readonly Dictionary<string, string> _uploaderPasswords = new(StringComparer.OrdinalIgnoreCase);
+
     public VipView(LauncherStore store, string root, Action save, Func<IEnumerable<string>> runtimeSearch)
     {
         _store = store;
@@ -102,17 +119,21 @@ internal sealed class VipView : PixelCanvas
         _runtimeSearch = runtimeSearch;
         _commands = new List<Command>
         {
-            new("手持ち", "このPCにある作品だけ。", "Only the games on this PC.", () => SetList(VipListMode.Owned), VipListMode.Owned),
-            new("全作品", "全部の作品を名前順に。お気に入りやグループで絞れるよ。", "Every game by title; narrow it to favorites or a group. Right-click a game for more.",
+            new("手持ち", "On This PC", "このPCにある作品だけ。", "Only the games on this PC.", () => SetList(VipListMode.Owned), VipListMode.Owned),
+            new("全作品", "All Games", "全部の作品を名前順に。お気に入りやグループで絞れるよ。", "Every game by title; narrow it to favorites or a group. Right-click a game for more.",
                 () => SetList(VipListMode.All), VipListMode.All),
-            new("祭り別", "祭りごとに作品を並べるよ。", "Works by matsuri.", () => SetList(VipListMode.Matsuri), VipListMode.Matsuri),
-            new("作者別", "作者ごとに作品を並べるよ。", "Works by author.", () => SetList(VipListMode.Author), VipListMode.Author)
+            new("祭り別", "By Festival", "祭りごとに作品を並べるよ。", "Works by festival.", () => SetList(VipListMode.Matsuri), VipListMode.Matsuri),
+            new("作者別", "By Author", "作者ごとに作品を並べるよ。", "Works by author.", () => SetList(VipListMode.Author), VipListMode.Author),
+            new("保管庫", "Thread Storage", "スレやwikiの保管庫、PCだけにある作品。", "Games from the thread and wiki storage uploaders, and games only on this PC.",
+                () => SetList(VipListMode.Storage), VipListMode.Storage),
+            new("プレイリスト", "Playlists", "自分で作った作品リスト。コードで共有もできるよ。", "Your own lists of games; share them as a code.",
+                () => SetList(VipListMode.Playlist), VipListMode.Playlist)
         };
         _tools = new List<Command>
         {
-            new("再スキャン", "フォルダを調べなおすよ。(F5)", "Look through the folders again. (F5)", () => _ = ScanAsync()),
-            new("フォルダ追加", "ゲームが入っているフォルダを選んでね。", "Add a folder that holds VIPRPG games.", () => _ = AddFolderAsync()),
-            new("設定", "起動方法、EasyRPG、フォルダ、モード切り替え。(S)", "Launch options, EasyRPG, folders, and the switch back to HRPG mode. (S)", ShowSettings)
+            new("再スキャン", "Rescan", "フォルダを調べなおすよ。(F5)", "Look through the folders again. (F5)", () => _ = ScanAsync()),
+            new("フォルダ追加", "Add Folder", "ゲームが入っているフォルダを選んでね。", "Add a folder that holds VIPRPG games.", () => _ = AddFolderAsync()),
+            new("設定", "Settings", "起動方法、EasyRPG、フォルダ、モード切り替え。(S)", "Launch options, EasyRPG, folders, and the switch back to HRPG mode. (S)", ShowSettings)
         };
         _command = Math.Max(0, _commands.FindIndex(c => c.Mode == Data.List));
         _host.Children.Add(this);
@@ -120,7 +141,6 @@ internal sealed class VipView : PixelCanvas
         _host.Children.Add(_search);
         _search.HorizontalAlignment = HorizontalAlignment.Left;
         _search.VerticalAlignment = VerticalAlignment.Top;
-        _search.Watermark = "検索 (Ctrl+F)";
         _search.Background = new SolidColorBrush(Color.FromArgb(150, 0, 0, 0));
         _search.Foreground = Brushes.White;
         _search.BorderBrush = new SolidColorBrush(Color.FromArgb(160, 255, 255, 255));
@@ -156,11 +176,19 @@ internal sealed class VipView : PixelCanvas
             Redraw();
         };
         Say("VIPRPGランチャーへようこそ！ 一覧の種類を選んで、作品を遊ぼう。",
-            "Welcome! Pick a list, then a matsuri or author, then a game. Enter plays, Esc goes back.");
-        RebuildSide();
+            "Welcome! Pick a list, then a festival or author, then a game. Enter plays, Esc goes back.");
+        ApplyLanguage();
     }
 
     private VipData Data => _store.Data.Vip;
+
+    /// <summary>Shows the launcher's words in the language chosen in 設定 → 言語 (side-list labels are rebuilt).</summary>
+    public void ApplyLanguage()
+    {
+        VipText.English = Data.English;
+        _search.Watermark = T("検索 (Ctrl+F)", "Search (Ctrl+F)");
+        RebuildSide();
+    }
 
     /// <summary>Starts the animation and, the first time, the folder scan.</summary>
     public void Start()
@@ -196,6 +224,8 @@ internal sealed class VipView : PixelCanvas
         }
         await ScanAsync();
         await RefreshServerAsync(quiet: true);
+        // Development aid: RPGLAUNCHER_PLAYLIST_TEXT=<file> makes a playlist from a title list, as ＋ テキストから作る… does.
+        if (Environment.GetEnvironmentVariable("RPGLAUNCHER_PLAYLIST_TEXT") is { Length: > 0 } text) await PlaylistFromTextAsync(text);
     }
 
     private void Show(List<GameEntry> games, List<string> zips)
@@ -269,7 +299,8 @@ internal sealed class VipView : PixelCanvas
         {
             if (string.IsNullOrWhiteSpace(work.No) || work.Downloads?.FirstOrDefault(VipOriginal.CanFetch) is not { } link) continue;
             string key = VipServer.Key(work.Matsuri, work.No!);
-            if (byWork.ContainsKey(key)) continue;
+            // The work's own link beats a file the archive couldn't keep, which may have been deleted since.
+            if (byWork.TryGetValue(key, out var existing) && existing.Source != "live") continue;
             byWork[key] = new VipServerGame
             {
                 Source = "original", Url = link, Matsuri = work.Matsuri, No = work.No, Title = work.Title, Author = work.Author,
@@ -277,7 +308,12 @@ internal sealed class VipView : PixelCanvas
             };
         }
         _remoteByWork = byWork;
-        _remoteExtras = extras.OrderBy(g => g.DisplayTitle, StringComparer.CurrentCultureIgnoreCase).ToList();
+        // An uploader with only a stray file or two is patches and leftovers, not a collection: left out everywhere.
+        // The server's own games (no area) always stay.
+        _remoteExtras = extras.GroupBy(g => g.Area)
+            .Where(area => area.Key is null || area.Count() >= StorageMinimum)
+            .SelectMany(area => area)
+            .OrderBy(g => g.DisplayTitle, StringComparer.CurrentCultureIgnoreCase).ToList();
         RebuildSide();
     }
 
@@ -361,15 +397,15 @@ internal sealed class VipView : PixelCanvas
             int owned = _catalog.Games.Count(w => w.Local is not null);
             if (folders.Count == 0)
                 Say("まだフォルダがないよ。「フォルダ追加」でゲームの場所を教えてね。",
-                    "No folders yet: use フォルダ追加 (Add folder) to show where your VIPRPG games are.");
+                    "No folders yet: use Add Folder to show where your VIPRPG games are.");
             else
                 Say($"{games.Count}本のゲームを見つけたぞ！ そのうち{owned}本が祭りの作品だ。",
-                    $"Found {games.Count} games; {owned} of them are matsuri entries in the catalog.");
+                    $"Found {games.Count} games; {owned} of them are festival entries in the catalog.");
         }
         catch (Exception ex)
         {
             Diagnostics.Log("VIPRPG scan failed: " + ex);
-            Say("スキャンに失敗した…", "The scan failed: " + ex.Message);
+            Say("スキャンに失敗した… " + ex.Message, "The scan failed: " + ex.Message);
         }
         finally
         {
@@ -438,7 +474,7 @@ internal sealed class VipView : PixelCanvas
         Data.List = mode;
         _save();
         RebuildSide();
-        _focus = Pane.Side;
+        _focus = HasFilterMenu ? Pane.Rows : Pane.Side;
     }
 
     private void RebuildSide()
@@ -447,23 +483,18 @@ internal sealed class VipView : PixelCanvas
         switch (Data.List)
         {
             case VipListMode.Matsuri:
+                // Festivals only: everything else is in 保管庫.
                 foreach (var matsuri in _catalog.Matsuri)
                     side.Add(new SideItem(matsuri.ShortName, matsuri.Works.Count(w => w.Local is not null), matsuri.Works.Count, matsuri, null, false));
-                if (_strays.Count + _strayZips.Count > 0)
-                    side.Add(new SideItem("その他のゲーム", _strays.Count, _strays.Count + _strayZips.Count, null, null, true));
-                // Downloadable games the catalog doesn't list, by the uploader area they came from.
-                foreach (var area in _remoteExtras.GroupBy(g => g.Area ?? "*server"))
-                {
-                    var games = area.ToList();
-                    side.Add(new SideItem(games[0].Area is null ? "サーバーの作品" : games[0].Thread ?? area.Key,
-                        games.Count(g => _remoteLocal.ContainsKey(g.Path)), games.Count, null, null, false, Server: true, Area: area.Key));
-                }
+                break;
+            case VipListMode.Storage:
+                side.AddRange(StorageSideItems());
                 break;
             case VipListMode.All:
             {
                 var all = AllRows();
-                side.Add(new SideItem("すべて", all.Count(r => r.Local is not null), all.Count, null, null, false, Filter: "*all"));
-                side.Add(new SideItem("★ お気に入り", all.Count(r => r.Local is not null && IsFavorite(r)), all.Count(IsFavorite),
+                side.Add(new SideItem(T("すべて", "All"), all.Count(r => r.Local is not null), all.Count, null, null, false, Filter: "*all"));
+                side.Add(new SideItem(T("★ お気に入り", "★ Favorites"), all.Count(r => r.Local is not null && IsFavorite(r)), all.Count(IsFavorite),
                     null, null, false, Filter: "*fav"));
                 foreach (string group in Data.Groups)
                 {
@@ -473,18 +504,47 @@ internal sealed class VipView : PixelCanvas
                 }
                 break;
             }
+            case VipListMode.Playlist:
+            {
+                var all = AllRows();
+                var keys = all.ToLookup(KeyOf, StringComparer.OrdinalIgnoreCase);
+                foreach (var playlist in Data.Playlists)
+                {
+                    // Each entry once: owned of all, the ones the launcher can't find included.
+                    var entries = playlist.Games.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    int owned = entries.Count(key => keys[key].FirstOrDefault()?.Local is not null);
+                    side.Add(new SideItem("♪ " + playlist.Name, owned, entries.Count, null, null, false,
+                        Filter: PlaylistFilter + playlist.Name));
+                }
+                side.Add(new SideItem(T("＋ 新しいプレイリスト…", "＋ New Playlist…"), 0, NoCount, null, null, false, Filter: NewPlaylistItem));
+                side.Add(new SideItem(T("＋ コードから読み込む…", "＋ Import from a Code…"), 0, NoCount, null, null, false, Filter: ImportPlaylistItem));
+                side.Add(new SideItem(T("＋ テキストから作る…", "＋ Make from a Text File…"), 0, NoCount, null, null, false, Filter: TextPlaylistItem));
+                break;
+            }
             case VipListMode.Author:
-                foreach (var (author, works) in _catalog.ByAuthor())
+                foreach (var (author, works) in _catalog.ByAuthor()
+                             .GroupBy(entry => AuthorLabel(entry.Author), StringComparer.OrdinalIgnoreCase)
+                             .Select(group => (group.Key, group.SelectMany(entry => entry.Works).ToList()))
+                             .OrderByDescending(entry => entry.Item2.Count)
+                             .ThenBy(entry => entry.Key, StringComparer.CurrentCultureIgnoreCase))
                     side.Add(new SideItem(author, works.Count(w => w.Local is not null), works.Count, null, author, false));
                 break;
             default:
                 side.AddRange(OwnedSideItems());
                 break;
         }
+        if (Data.Pinned.Count > 0)
+        {
+            var pinned = side.Where(item => PinKey(item) is { } key && Data.Pinned.Contains(key))
+                .OrderBy(item => Data.Pinned.IndexOf(PinKey(item)!)).ToList();
+            side = pinned.Concat(side.Except(pinned)).ToList();
+        }
         _side = side;
         int index = Data.List == VipListMode.Owned ? side.FindIndex(item => item.Filter == Data.OwnedSort)
             : Data.Selected is { } key ? side.FindIndex(item => SideKey(item) == key) : -1;
-        _sideIndex = Math.Max(0, index);
+        // Never a heading: 保管庫 starts with one.
+        if (index < 0) index = Math.Max(0, side.FindIndex(item => item.Total != Heading));
+        _sideIndex = index;
         _sideTop = Math.Max(0, _sideIndex - _sideVisible / 2);
         RebuildRows();
     }
@@ -500,7 +560,19 @@ internal sealed class VipView : PixelCanvas
         {
             rows.AddRange(OwnedRows());
         }
-        else if (item?.Filter is { } filter)
+        else if (item?.Filter is { } list && list.StartsWith(PlaylistFilter, StringComparison.Ordinal))
+        {
+            if (Data.Playlists.FirstOrDefault(p => p.Name == list[PlaylistFilter.Length..]) is { } playlist)
+            {
+                var keys = AllRows().ToLookup(KeyOf, StringComparer.OrdinalIgnoreCase);
+                // Entries the launcher doesn't know stay in the list, marked, so they can be looked for.
+                // Each game once, even if the list has it twice.
+                rows.AddRange(playlist.Games.Distinct(StringComparer.OrdinalIgnoreCase).Select(key => keys[key].FirstOrDefault()
+                    ?? new Row(null, null, "!!!!", key.StartsWith(TitleKeyPrefix, StringComparison.Ordinal) ? key[TitleKeyPrefix.Length..] : key, "",
+                        Missing: key)));
+            }
+        }
+        else if (item?.Filter is { } filter && !filter.StartsWith("*playlist", StringComparison.Ordinal))
         {
             var all = AllRows();
             rows.AddRange(filter == "*fav" ? all.Where(IsFavorite)
@@ -513,7 +585,7 @@ internal sealed class VipView : PixelCanvas
         }
         else if (item?.Author is { } author)
         {
-            foreach (var work in _catalog.Games.Where(w => string.Equals(w.Author?.Trim(), author, StringComparison.OrdinalIgnoreCase)))
+            foreach (var work in _catalog.Games.Where(w => string.Equals(AuthorLabel(w.Author), author, StringComparison.OrdinalIgnoreCase)))
                 rows.Add(RowFor(work, Short(work.Event)));
         }
         else if (item?.Strays == true)
@@ -534,6 +606,9 @@ internal sealed class VipView : PixelCanvas
             var downloaded = _remoteExtras.Where(g => _remoteLocal.ContainsKey(g.Path)).Select(g => RowFor(g));
             rows.AddRange(matched.Concat(others).Concat(downloaded).OrderBy(r => r.Title, StringComparer.CurrentCultureIgnoreCase));
         }
+        // Counted before completed games are hidden or a search narrows the list: the whole matsuri or playlist.
+        _completedCount = (rows.Count(IsCompleted), rows.Count);
+        if (!Data.ShowCompleted && Data.Completed.Count > 0) rows = rows.Where(r => !IsCompleted(r)).ToList();
         if (_query.Length > 0)
         {
             string query = Fold(_query);
@@ -553,21 +628,68 @@ internal sealed class VipView : PixelCanvas
     // Side-list rows that are a heading, or an order with no count.
     private const int Heading = -2, NoCount = -1;
 
-    private static readonly (string Key, string Label)[] OwnedSorts =
+    private static (string Key, string Label)[] OwnedSorts =>
+    [
+        ("sort:title", T("タイトル順", "By Title")), ("sort:recent", T("最近遊んだ順", "Recently Played")),
+        ("sort:most", T("よく遊んだ順", "Most Played")), ("sort:time", T("プレイ時間順", "Play Time")),
+        ("sort:added", T("追加した順", "Recently Added")), ("sort:matsuri", T("祭り順", "By Festival"))
+    ];
+
+    /// <summary>Uploaders with fewer games than this are left out of 保管庫: a stray patch or two, not a collection.</summary>
+    private const int StorageMinimum = 3;
+
+    // The archive's sections, in the order 保管庫 lists them; any other section goes under その他.
+    private static readonly string[] StorageSections = { "保存库", "Wiki", "主帖用上传区", "モナーRPG", "アレックス総受け" };
+
+    private static string StorageHeading(string section) => section switch
     {
-        ("sort:title", "タイトル順"), ("sort:recent", "最近遊んだ順"), ("sort:most", "よく遊んだ順"),
-        ("sort:time", "プレイ時間順"), ("sort:added", "追加した順"), ("sort:matsuri", "祭り順")
+        "保存库" => T("保管庫", "Storage"),
+        "Wiki" => T("wiki保管庫", "Wiki Storage"),
+        "主帖用上传区" => T("スレのうｐろだ", "Thread Uploaders"),
+        "*other" => T("その他", "Other"),
+        "*pc" => T("PCだけにある作品", "Only on This PC"),
+        _ => section
     };
+
+    /// <summary>
+    /// 保管庫's side list: the storage uploaders under their sections, biggest first, then the games on this PC that
+    /// no festival lists.
+    /// </summary>
+    private List<SideItem> StorageSideItems()
+    {
+        var items = new List<SideItem>();
+        var areas = _remoteExtras.GroupBy(g => g.Area ?? "*server")
+            .Select(group => group.ToList())
+            .GroupBy(games => games[0].Area is null ? "*server"
+                : Array.IndexOf(StorageSections, games[0].Section) >= 0 ? games[0].Section! : "*other")
+            .OrderBy(section => section.Key == "*server" ? -1 : section.Key == "*other" ? StorageSections.Length : Array.IndexOf(StorageSections, section.Key));
+        foreach (var section in areas)
+        {
+            if (section.Key != "*server") items.Add(new SideItem(StorageHeading(section.Key), 0, Heading, null, null, false));
+            foreach (var games in section.OrderByDescending(games => games.Count))
+            {
+                string key = games[0].Area ?? "*server";
+                items.Add(new SideItem(games[0].Area is null ? T("サーバーの作品", "Server Games") : games[0].Thread ?? key,
+                    games.Count(g => _remoteLocal.ContainsKey(g.Path)), games.Count, null, null, false, Server: true, Area: key));
+            }
+        }
+        if (_strays.Count + _strayZips.Count > 0)
+        {
+            items.Add(new SideItem(StorageHeading("*pc"), 0, Heading, null, null, false));
+            items.Add(new SideItem(T("その他のゲーム", "Other Games"), _strays.Count, _strays.Count + _strayZips.Count, null, null, true));
+        }
+        return items;
+    }
 
     /// <summary>手持ち's side list: the orders, then the filters (favorites, groups, engines) with their counts.</summary>
     private List<SideItem> OwnedSideItems()
     {
         var owned = AllRows().Where(r => r.Local is not null).ToList();
-        var items = new List<SideItem> { new("並べ替え", 0, Heading, null, null, false) };
+        var items = new List<SideItem> { new(T("並べ替え", "Sort"), 0, Heading, null, null, false) };
         items.AddRange(OwnedSorts.Select(sort => new SideItem(sort.Label, 0, NoCount, null, null, false, Filter: sort.Key)));
-        items.Add(new SideItem("絞り込み", 0, Heading, null, null, false));
-        items.Add(new SideItem("すべて", owned.Count, owned.Count, null, null, false, Filter: "show:all"));
-        items.Add(new SideItem("★ お気に入り", owned.Count(IsFavorite), owned.Count(IsFavorite), null, null, false, Filter: "show:fav"));
+        items.Add(new SideItem(T("絞り込み", "Show"), 0, Heading, null, null, false));
+        items.Add(new SideItem(T("すべて", "All"), owned.Count, owned.Count, null, null, false, Filter: "show:all"));
+        items.Add(new SideItem(T("★ お気に入り", "★ Favorites"), owned.Count(IsFavorite), owned.Count(IsFavorite), null, null, false, Filter: "show:fav"));
         foreach (string group in Data.Groups)
         {
             int count = owned.Count(r => InGroup(r, group));
@@ -606,6 +728,36 @@ internal sealed class VipView : PixelCanvas
         };
     }
 
+    /// <summary>手持ち and 全作品 have no page of matsuri or authors: their sorts and filters are a menu instead.</summary>
+    private bool HasFilterMenu => Data.List is VipListMode.Owned or VipListMode.All;
+
+    /// <summary>The 並べ替え・絞り込み menu: the side list's orders and filters, the current ones checked.</summary>
+    private void OpenFilterMenu(Point at)
+    {
+        var items = new List<VipMenu.Item>();
+        for (int i = 0; i < _side.Count; i++)
+        {
+            var item = _side[i];
+            if (item.Total == Heading)
+            {
+                items.Add(new(item.Label, null));
+                continue;
+            }
+            int index = i;
+            bool chosen = Data.List == VipListMode.Owned
+                ? item.Filter == Data.OwnedSort || item.Filter == Data.OwnedFilter
+                : index == _sideIndex;
+            string count = item.Total == NoCount ? "" : $"  ({item.Total})";
+            items.Add(new("  " + item.Label + count, () =>
+            {
+                CloseOverlay();
+                SelectSide(index);
+            }, Checked: chosen));
+        }
+        _overlay = new VipMenu(at, items, CloseOverlay);
+        Redraw();
+    }
+
     private void ChooseOwned(SideItem item)
     {
         if (item.Filter is not { } choice) return;
@@ -614,7 +766,7 @@ internal sealed class VipView : PixelCanvas
         _save();
         _rowIndex = _rowTop = 0;
         RebuildRows();
-        string sort = OwnedSorts.FirstOrDefault(s => s.Key == Data.OwnedSort).Label ?? "タイトル順";
+        string sort = OwnedSorts.FirstOrDefault(s => s.Key == Data.OwnedSort).Label ?? T("タイトル順", "By Title");
         Say($"手持ちを{sort}で、{item.Label.TrimStart('★', '■', ' ')}を表示中。{_rows.Count}本あるよ。",
             $"Your games: {_rows.Count} shown, {sort}.");
     }
@@ -638,12 +790,30 @@ internal sealed class VipView : PixelCanvas
 
     /// <summary>A game's lasting key: its catalog work, archive path, folder or zip.</summary>
     private static string KeyOf(Row row) =>
-        row.Work is { } work ? $"{work.Matsuri}/{(string.IsNullOrWhiteSpace(work.No) ? work.Title : work.No)}"
+        row.Missing is { } missing ? missing
+        : row.Work is { } work ? $"{work.Matsuri}/{(string.IsNullOrWhiteSpace(work.No) ? work.Title : work.No)}"
         : row.Remote is { } remote ? "dl:" + remote.Path
         : row.Local is { } local ? "pc:" + Path.GetFullPath(local.RootPath)
         : "zip:" + row.Zip;
 
     private bool IsFavorite(Row row) => Data.Favorites.Contains(KeyOf(row), StringComparer.OrdinalIgnoreCase);
+
+    private bool IsCompleted(Row row) => Data.Completed.Contains(KeyOf(row), StringComparer.OrdinalIgnoreCase);
+
+    private void ToggleCompleted(Row row)
+    {
+        string key = KeyOf(row);
+        bool now = !IsCompleted(row);
+        if (now) Data.Completed.Add(key);
+        else Data.Completed.RemoveAll(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
+        _save();
+        Say(now ? $"「{row.Title}」をクリア済みにしたよ。{(Data.ShowCompleted ? "" : "（設定で隠しているので一覧から消えるよ）")}" : $"「{row.Title}」のクリア済みを外したよ。",
+            now ? $"Marked {row.Title} completed.{(Data.ShowCompleted ? "" : " Completed games are hidden (Settings), so it leaves the list.")}" : $"{row.Title} is no longer marked completed.");
+        RebuildList();
+    }
+
+    /// <summary>Rebuilds the lists after a setting changes what they show.</summary>
+    public void RefreshList() => RebuildList();
 
     private bool InGroup(Row row, string group) =>
         Data.GroupMembers.TryGetValue(KeyOf(row), out var groups) && groups.Contains(group, StringComparer.Ordinal);
@@ -677,7 +847,7 @@ internal sealed class VipView : PixelCanvas
     private async Task NewGroupAsync(Row? row)
     {
         if (TopLevel.GetTopLevel(this) is not Window window) return;
-        var dialog = new TextPromptDialog("新しいグループ", "グループの名前 (group name):", "", "作る");
+        var dialog = new TextPromptDialog(T("新しいグループ", "New Group"), T("グループの名前:", "Group name:"), "", T("作る", "Create"));
         if (!await dialog.ShowAsync(window) || dialog.Value.Length == 0) return;
         string name = dialog.Value;
         if (!Data.Groups.Contains(name, StringComparer.Ordinal)) Data.Groups.Add(name);
@@ -703,6 +873,226 @@ internal sealed class VipView : PixelCanvas
         RebuildList();
     }
 
+    // ---- playlists ----
+
+    private const string PlaylistFilter = "playlist:", NewPlaylistItem = "*playlist-new", ImportPlaylistItem = "*playlist-import",
+        TextPlaylistItem = "*playlist-text";
+
+    // A playlist entry made from a title the launcher couldn't find.
+    private const string TitleKeyPrefix = "title:";
+
+    // Share codes: this prefix, then the playlist as deflated JSON in URL-safe base64.
+    private const string PlaylistCodePrefix = "VIPRPG-PL1:";
+
+    /// <summary>Opens a side entry's works, or runs it when it's one of the playlist actions.</summary>
+    private void OpenSide(int index)
+    {
+        if (index < 0 || index >= _side.Count) return;
+        if (_side[index].Filter == NewPlaylistItem)
+        {
+            _ = NewPlaylistAsync(null);
+            return;
+        }
+        if (_side[index].Filter == ImportPlaylistItem)
+        {
+            _ = ImportPlaylistAsync();
+            return;
+        }
+        if (_side[index].Filter == TextPlaylistItem)
+        {
+            _ = PlaylistFromTextAsync();
+            return;
+        }
+        SelectSide(index);
+        // Choosing opens its works.
+        _focus = Pane.Rows;
+    }
+
+    private bool InPlaylist(Row row, VipPlaylist playlist) => playlist.Games.Contains(KeyOf(row), StringComparer.OrdinalIgnoreCase);
+
+    private void TogglePlaylist(Row row, VipPlaylist playlist)
+    {
+        string key = KeyOf(row);
+        bool add = !InPlaylist(row, playlist);
+        if (add) playlist.Games.Add(key);
+        else playlist.Games.RemoveAll(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
+        _save();
+        Say(add ? $"「{row.Title}」をプレイリスト「{playlist.Name}」に入れたよ。({playlist.Games.Count}本)" : $"「{row.Title}」を「{playlist.Name}」から出したよ。",
+            add ? $"Added {row.Title} to the playlist {playlist.Name} ({playlist.Games.Count} games)." : $"Took {row.Title} out of {playlist.Name}.");
+        RebuildList();
+    }
+
+    private async Task NewPlaylistAsync(Row? row)
+    {
+        if (TopLevel.GetTopLevel(this) is not Window window) return;
+        var dialog = new TextPromptDialog(T("新しいプレイリスト", "New Playlist"), T("プレイリストの名前:", "Playlist name:"), "", T("作る", "Create"));
+        if (!await dialog.ShowAsync(window) || dialog.Value.Length == 0) return;
+        var playlist = Data.Playlists.FirstOrDefault(p => p.Name == dialog.Value);
+        if (playlist is null) Data.Playlists.Add(playlist = new VipPlaylist { Name = dialog.Value });
+        if (row is not null)
+        {
+            if (!InPlaylist(row, playlist)) TogglePlaylist(row, playlist);
+            return;
+        }
+        _save();
+        RebuildList();
+        Say($"プレイリスト「{playlist.Name}」を作ったよ。作品を右クリックして入れてね。",
+            $"Made the playlist {playlist.Name}. Right-click games to add them.");
+    }
+
+    /// <summary>The right-click menu for a playlist: copy its share code, or delete it.</summary>
+    private void OpenPlaylistMenu(string name, Point at)
+    {
+        if (Data.Playlists.FirstOrDefault(p => p.Name == name) is not { } playlist) return;
+        _overlay = new VipMenu(at, new List<VipMenu.Item>
+        {
+            new(T("コードをコピー", "Copy Code"), () => _ = CopyPlaylistCodeAsync(playlist)),
+            new(T("名前を変える…", "Rename…"), () => _ = RenamePlaylistAsync(playlist)),
+            new(T($"「{RetroDraw.Fit(name, 140)}」を消す", $"Delete {RetroDraw.Fit(name, 140)}"), () =>
+            {
+                Data.Playlists.Remove(playlist);
+                _save();
+                CloseOverlay();
+                RebuildList();
+                Say($"プレイリスト「{name}」を消したよ。作品はそのまま。", $"Deleted the playlist {name}; its games are untouched.");
+            })
+        }, CloseOverlay);
+        Redraw();
+    }
+
+    private async Task RenamePlaylistAsync(VipPlaylist playlist)
+    {
+        CloseOverlay();
+        if (TopLevel.GetTopLevel(this) is not Window window) return;
+        var dialog = new TextPromptDialog(T("プレイリストの名前", "Rename Playlist"), T("新しい名前:", "New name:"), playlist.Name, T("変える", "Rename"));
+        if (!await dialog.ShowAsync(window) || dialog.Value.Length == 0 || dialog.Value == playlist.Name) return;
+        if (Data.Playlists.Any(p => p != playlist && p.Name == dialog.Value))
+        {
+            Say($"「{dialog.Value}」はもうあるよ。", $"There's already a playlist called {dialog.Value}.");
+            return;
+        }
+        string old = playlist.Name;
+        playlist.Name = dialog.Value;
+        // Keep it open if it was.
+        if (Data.Selected == PlaylistFilter + old) Data.Selected = PlaylistFilter + playlist.Name;
+        _save();
+        RebuildList();
+        Say($"「{old}」を「{playlist.Name}」にしたよ。", $"Renamed {old} to {playlist.Name}.");
+    }
+
+    /// <summary>
+    /// Copies a playlist as a code anyone can paste. Only games that mean the same on every PC go in: matsuri works and
+    /// archive games, not folders or zips on this one.
+    /// </summary>
+    private async Task CopyPlaylistCodeAsync(VipPlaylist playlist)
+    {
+        CloseOverlay();
+        var shared = playlist.Games.Where(key => !key.StartsWith("pc:", StringComparison.Ordinal) && !key.StartsWith("zip:", StringComparison.Ordinal)).ToList();
+        string json = System.Text.Json.JsonSerializer.Serialize(new { n = playlist.Name, g = shared });
+        using var buffer = new MemoryStream();
+        using (var deflate = new System.IO.Compression.DeflateStream(buffer, System.IO.Compression.CompressionLevel.SmallestSize, leaveOpen: true))
+            deflate.Write(System.Text.Encoding.UTF8.GetBytes(json));
+        string code = PlaylistCodePrefix + Convert.ToBase64String(buffer.ToArray()).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(code);
+        int left = playlist.Games.Count - shared.Count;
+        Say($"「{playlist.Name}」のコードをコピーしたよ。({shared.Count}本{(left > 0 ? $"、PCだけの{left}本は除外" : "")})",
+            $"Copied the code for {playlist.Name}: {shared.Count} games{(left > 0 ? $"; {left} only on this PC were left out" : "")}. Paste it to share.");
+    }
+
+    /// <summary>
+    /// Makes a playlist from a text file of titles, one per line (『』 and 「」 are fine), named after the file. Each title
+    /// counts once, and a title several works share goes to the oldest; titles the launcher
+    /// can't find stay in the list, marked.
+    /// </summary>
+    private async Task PlaylistFromTextAsync()
+    {
+        if (await PickAsync(folder: false, T("プレイリストにするテキスト (1行に1タイトル)", "Text File for the Playlist (one title per line)")) is not { } path) return;
+        await PlaylistFromTextAsync(path);
+    }
+
+    private async Task PlaylistFromTextAsync(string path)
+    {
+        string[] lines;
+        try
+        {
+            lines = TextFiles.Decode(await File.ReadAllBytesAsync(path)).Split('\n');
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Say("ファイルが読めなかった… " + ex.Message, "Couldn't read the file: " + ex.Message);
+            return;
+        }
+        var titles = lines.Select(line => line.Trim().Trim('『', '』', '「', '」', '"').Trim()).Where(line => line.Length > 0).ToList();
+
+        // Candidates by title: matsuri works oldest first, then games outside the catalog.
+        var rows = AllRows().Where(r => r.Title.Length > 0)
+            .OrderBy(r => r.Work is null).ThenBy(r => r.Work?.Event?.Year ?? 9999).ThenBy(r => r.Work?.Matsuri, StringComparer.Ordinal)
+            .ToList();
+        var byTitle = rows.ToLookup(r => VipCatalog.TitleKey(r.Title));
+        var games = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        int found = 0;
+        foreach (string title in titles)
+        {
+            string key = VipCatalog.TitleKey(title);
+            // A title listed more than once is one entry.
+            if (!seen.Add(key.Length > 0 ? key : title)) continue;
+            var candidates = byTitle[key].ToList();
+            // Else a title that's the start or part of a longer one ("キュアーⅠのデトックスラジオ" → "…2015").
+            if (candidates.Count == 0 && key.Length >= 4)
+                candidates = rows.Where(r => VipCatalog.TitleKey(r.Title) is { Length: >= 4 } other && (other.Contains(key) || key.Contains(other))).ToList();
+            if (candidates.Count == 0)
+            {
+                games.Add(TitleKeyPrefix + title);
+                continue;
+            }
+            string game = KeyOf(candidates[0]);
+            // Two titles that land on the same game are one entry too.
+            if (games.Contains(game, StringComparer.OrdinalIgnoreCase)) continue;
+            games.Add(game);
+            found++;
+        }
+
+        string name = Path.GetFileNameWithoutExtension(path), unique = name;
+        for (int i = 2; Data.Playlists.Any(p => p.Name == unique); i++) unique = $"{name} ({i})";
+        Data.Playlists.Add(new VipPlaylist { Name = unique, Games = games });
+        _save();
+        RebuildList();
+        Say($"プレイリスト「{unique}」を作ったよ。{games.Count}本中{found}本が見つかった。見つからないのは赤で表示。",
+            $"Made the playlist {unique}: {games.Count} games, {found} found; the rest are kept in red as !!!!.");
+    }
+
+    /// <summary>Adds a playlist from a pasted code, under a new name if one of that name exists.</summary>
+    private async Task ImportPlaylistAsync()
+    {
+        if (TopLevel.GetTopLevel(this) is not Window window) return;
+        var dialog = new TextPromptDialog(T("プレイリストを読み込む", "Import a Playlist"), T("コードを貼り付けてね:", "Paste a playlist code:"), "", T("読み込む", "Import"));
+        if (!await dialog.ShowAsync(window) || dialog.Value.Length == 0) return;
+        try
+        {
+            string text = dialog.Value.Trim();
+            if (!text.StartsWith(PlaylistCodePrefix, StringComparison.Ordinal)) throw new FormatException();
+            string base64 = text[PlaylistCodePrefix.Length..].Replace('-', '+').Replace('_', '/');
+            base64 = base64.PadRight(base64.Length + (4 - base64.Length % 4) % 4, '=');
+            using var input = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)),
+                System.IO.Compression.CompressionMode.Decompress);
+            using var json = System.Text.Json.JsonDocument.Parse(input);
+            string name = json.RootElement.GetProperty("n").GetString() is { Length: > 0 } n ? n : T("プレイリスト", "Playlist");
+            var games = json.RootElement.GetProperty("g").EnumerateArray().Select(e => e.GetString()).OfType<string>()
+                .Where(key => key.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            string unique = name;
+            for (int i = 2; Data.Playlists.Any(p => p.Name == unique); i++) unique = $"{name} ({i})";
+            Data.Playlists.Add(new VipPlaylist { Name = unique, Games = games });
+            _save();
+            RebuildList();
+            Say($"プレイリスト「{unique}」を読み込んだよ。({games.Count}本)", $"Added the playlist {unique}: {games.Count} games.");
+        }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or InvalidDataException or KeyNotFoundException or InvalidOperationException)
+        {
+            Say("そのコードは読めなかった…", "That isn't a playlist code (they start with " + PlaylistCodePrefix + ").");
+        }
+    }
+
     /// <summary>Rebuilds the side list and rows, keeping the selection.</summary>
     private void RebuildList()
     {
@@ -718,29 +1108,137 @@ internal sealed class VipView : PixelCanvas
         var items = new List<VipMenu.Item>();
         if (row.Local is { } game)
         {
-            items.Add(new("遊ぶ", () => Play(row)));
-            if (EngineFamilies.HasTestMode(game.Family)) items.Add(new("テストプレイ", () => Play(row, testPlay: true)));
+            items.Add(new(T("遊ぶ", "Play"), () => Play(row)));
+            if (EngineFamilies.HasTestMode(game.Family)) items.Add(new(T("テストプレイ", "Test Play"), () => Play(row, testPlay: true)));
         }
-        else if (row.Zip is { } zip) items.Add(new("展開", () => _ = ExtractAsync(zip)));
-        else if (row.Remote is { } remote) items.Add(new("ダウンロード", () => _ = DownloadAsync(remote)));
+        else if (row.Zip is { } zip) items.Add(new(T("展開", "Extract"), () => _ = ExtractAsync(zip)));
+        else if (row.Remote is { } remote) items.Add(new(T("ダウンロード", "Download"), () => _ = DownloadAsync(remote)));
         bool favorite = IsFavorite(row);
-        items.Add(new(favorite ? "お気に入りから外す" : "お気に入りに追加", () => ToggleFavorite(row), Checked: favorite));
-        if (Data.Groups.Count > 0) items.Add(new("グループ", null));
+        items.Add(new(favorite ? T("お気に入りから外す", "Remove from Favorites") : T("お気に入りに追加", "Add to Favorites"), () => ToggleFavorite(row), Checked: favorite));
+        bool completed = IsCompleted(row);
+        items.Add(new(completed ? T("クリア済みを外す", "Unmark Completed") : T("クリア済みにする", "Mark Completed"), () => ToggleCompleted(row), Checked: completed));
+        if (Data.Groups.Count > 0) items.Add(new(T("グループ", "Groups"), null));
         foreach (string group in Data.Groups)
         {
             string name = group;
             items.Add(new("  " + name, () => ToggleGroup(row, name), Checked: InGroup(row, name)));
         }
-        items.Add(new("新しいグループ…", () => _ = NewGroupAsync(row)));
-        if (row.Local is { } local)
+        items.Add(new(T("新しいグループ…", "New Group…"), () => _ = NewGroupAsync(row)));
+        if (Data.Playlists.Count > 0) items.Add(new(T("プレイリスト", "Playlists"), null));
+        foreach (var playlist in Data.Playlists)
         {
-            items.Add(new("説明書", () => OpenReadme(local)));
-            items.Add(new("フォルダを開く", () => OpenFolder(local.RootPath)));
+            var list = playlist;
+            items.Add(new("  ♪ " + list.Name, () => TogglePlaylist(row, list), Checked: InPlaylist(row, list)));
         }
-        if (row.Work?.Downloads?.FirstOrDefault() is { } original) items.Add(new("配布元を開く", () => OpenUrl(original)));
+        items.Add(new(T("新しいプレイリスト…", "New Playlist…"), () => _ = NewPlaylistAsync(row)));
+        if (row.Local is { } local) items.Add(new(T("フォルダを開く", "Open Folder"), () => OpenFolder(local.RootPath)));
+        if (row.Work?.Downloads?.FirstOrDefault() is { } original) items.Add(new(T("配布元を開く", "Open Download Page"), () => OpenUrl(original)));
         if (row.Work?.WikiUrl is { } wiki) items.Add(new("wiki", () => OpenUrl(wiki)));
         _overlay = new VipMenu(at, items, CloseOverlay);
         Redraw();
+    }
+
+    // ---- linked authors ----
+
+    // The author picked with ほかの作者とまとめる…, waiting for the one to link it with.
+    private string? _linking;
+
+    /// <summary>The linked authors an author belongs to, or null.</summary>
+    private List<string>? LinkOf(string author) =>
+        Data.AuthorLinks.FirstOrDefault(link => link.Contains(author, StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>An author as lists show it: "A + B" when linked with others, else the name itself.</summary>
+    private string AuthorLabel(string? author)
+    {
+        string name = author?.Trim() ?? "";
+        return name.Length > 0 && LinkOf(name) is { } link ? string.Join(" + ", link) : name;
+    }
+
+    /// <summary>The names behind an author list entry: the linked authors, or just the one.</summary>
+    private List<string> AuthorsOf(string label) =>
+        Data.AuthorLinks.FirstOrDefault(link => string.Equals(string.Join(" + ", link), label, StringComparison.OrdinalIgnoreCase))
+        ?? new List<string> { label };
+
+    /// <summary>The right-click menu for an author: link with another (two steps), or unlink.</summary>
+    private void OpenAuthorMenu(string label, Point at)
+    {
+        var items = new List<VipMenu.Item>();
+        if (_linking is { } pending && !string.Equals(pending, label, StringComparison.OrdinalIgnoreCase))
+        {
+            items.Add(new(T($"「{RetroDraw.Fit(pending, 140)}」とまとめる", $"Link with {RetroDraw.Fit(pending, 140)}"), () => LinkAuthors(pending, label)));
+            items.Add(new(T("まとめるのをやめる", "Cancel Linking"), () =>
+            {
+                _linking = null;
+                Say("まとめるのをやめたよ。", "Linking cancelled.");
+            }));
+        }
+        else
+        {
+            items.Add(new(T("ほかの作者とまとめる…", "Link with Another Author…"), () =>
+            {
+                _linking = label;
+                Say($"「{label}」とまとめる作者を右クリックしてね。",
+                    $"Now right-click the author to link with {label}: they'll show as one.");
+            }));
+        }
+        if (AuthorsOf(label).Count > 1) items.Add(new(T("まとめを解除", "Unlink Authors"), () => UnlinkAuthors(label)));
+        items.Add(PinItem("author:" + label));
+        _overlay = new VipMenu(at, items, CloseOverlay);
+        Redraw();
+    }
+
+    private void LinkAuthors(string first, string second)
+    {
+        var names = AuthorsOf(first).Concat(AuthorsOf(second)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Data.AuthorLinks.RemoveAll(link => link.Any(name => names.Contains(name, StringComparer.OrdinalIgnoreCase)));
+        Data.AuthorLinks.Add(names);
+        _linking = null;
+        string label = string.Join(" + ", names);
+        RenamePin(new[] { first, second }, label);
+        Data.Selected = label;
+        _save();
+        RebuildSide();
+        Say($"「{label}」としてまとめたよ。", $"Linked: {label} now show as one author.");
+    }
+
+    private void UnlinkAuthors(string label)
+    {
+        var names = AuthorsOf(label);
+        Data.AuthorLinks.RemoveAll(link => string.Equals(string.Join(" + ", link), label, StringComparison.OrdinalIgnoreCase));
+        RenamePin(new[] { label }, names[0]);
+        if (string.Equals(Data.Selected, label, StringComparison.OrdinalIgnoreCase)) Data.Selected = names[0];
+        _save();
+        RebuildSide();
+        Say($"「{label}」のまとめを解除したよ。", $"Unlinked: {string.Join(", ", names)} are separate again.");
+    }
+
+    /// <summary>Moves an author's pin to the entry it became (linked or unlinked), keeping its place.</summary>
+    private void RenamePin(IEnumerable<string> from, string to)
+    {
+        var keys = from.Select(name => "author:" + name).ToList();
+        int at = Data.Pinned.FindIndex(keys.Contains);
+        if (at < 0) return;
+        Data.Pinned.RemoveAll(keys.Contains);
+        Data.Pinned.Insert(Math.Min(at, Data.Pinned.Count), "author:" + to);
+    }
+
+    /// <summary>The pin key of a side-list entry: its matsuri or author; null for anything else.</summary>
+    private static string? PinKey(SideItem item) =>
+        item.Matsuri is { } matsuri ? "matsuri:" + matsuri.Id : item.Author is { } author ? "author:" + author : null;
+
+    /// <summary>上に固定 / 固定を外す for a matsuri or author.</summary>
+    private VipMenu.Item PinItem(string key)
+    {
+        bool pinned = Data.Pinned.Contains(key);
+        return new(pinned ? T("固定を外す", "Unpin") : T("上に固定", "Pin to Top"), () =>
+        {
+            if (pinned) Data.Pinned.Remove(key);
+            else Data.Pinned.Add(key);
+            _save();
+            CloseOverlay();
+            RebuildSide();
+            Say(pinned ? "固定を外したよ。" : "一覧のいちばん上に固定したよ。", pinned ? "Unpinned." : "Pinned to the top of the list.");
+        }, Checked: pinned);
     }
 
     /// <summary>The right-click menu for a group in the side list.</summary>
@@ -748,13 +1246,13 @@ internal sealed class VipView : PixelCanvas
     {
         _overlay = new VipMenu(at, new List<VipMenu.Item>
         {
-            new("新しいグループ…", () => _ = NewGroupAsync(null)),
-            new($"「{group}」を消す", () => DeleteGroup(group))
+            new(T("新しいグループ…", "New Group…"), () => _ = NewGroupAsync(null)),
+            new(T($"「{group}」を消す", $"Delete {group}"), () => DeleteGroup(group))
         }, CloseOverlay);
         Redraw();
     }
 
-    private Row RowFor(VipWork work, string? no) => new(work, work.Local, no ?? "", work.Title, work.Author ?? "", work.LocalZip,
+    private Row RowFor(VipWork work, string? no) => new(work, work.Local, no ?? "", work.Title, AuthorLabel(work.Author), work.LocalZip,
         string.IsNullOrWhiteSpace(work.No) ? null : _remoteByWork.GetValueOrDefault(VipServer.Key(work.Matsuri, work.No!)));
 
     /// <summary>A server game the catalog doesn't list, such as one from a thread.</summary>
@@ -768,7 +1266,7 @@ internal sealed class VipView : PixelCanvas
 
     // ---- actions ----
 
-    /// <summary>Puts a line in the banner's message area.</summary>
+    /// <summary>Puts a line in the banner's message area; only the chosen language's is shown.</summary>
     private void Say(string japanese, string english)
     {
         _say = japanese;
@@ -801,6 +1299,9 @@ internal sealed class VipView : PixelCanvas
     {
         if (_rows.Count == 0) return;
         _rowIndex = Math.Clamp(index, 0, _rows.Count - 1);
+        // The list follows the selection here, when it moves; the wheel scrolls without moving it.
+        if (_rowIndex < _rowTop) _rowTop = _rowIndex;
+        if (_rowIndex >= _rowTop + _rowsVisible) _rowTop = _rowIndex - _rowsVisible + 1;
         Redraw();
     }
 
@@ -810,7 +1311,7 @@ internal sealed class VipView : PixelCanvas
         {
             if (row.Zip is { } zip)
                 Say("この作品はzipのままだ。「展開」で遊べるようになるよ。",
-                    $"This one is still zipped ({Path.GetFileName(zip)}): press 展開 (Extract) to unpack it.");
+                    $"This one is still zipped ({Path.GetFileName(zip)}): press Extract to unpack it.");
             else if (row.Remote is { } remote)
                 _ = DownloadAsync(remote);
             else if (row.Work?.WikiUrl is not null)
@@ -837,7 +1338,7 @@ internal sealed class VipView : PixelCanvas
             else
             {
                 process = null;
-                problem = "起動できるプログラムが見つからない。";
+                problem = T("起動できるプログラムが見つからない。", "No program to start the game was found.");
             }
         }
         catch (Exception ex)
@@ -848,7 +1349,7 @@ internal sealed class VipView : PixelCanvas
 
         if (process is null)
         {
-            Say("起動できなかった…", (problem ?? "The game didn't start.").Replace('\n', ' '));
+            Say("起動できなかった… " + (problem ?? "").Replace('\n', ' '), (problem ?? "The game didn't start.").Replace('\n', ' '));
             return;
         }
 
@@ -887,7 +1388,7 @@ internal sealed class VipView : PixelCanvas
         catch (Exception ex)
         {
             Diagnostics.Log($"Zip not extracted {zip}: {ex}");
-            Say("展開できなかった…", "Couldn't extract it: " + ex.Message);
+            Say("展開できなかった… " + ex.Message, "Couldn't extract it: " + ex.Message);
         }
         finally
         {
@@ -943,7 +1444,7 @@ internal sealed class VipView : PixelCanvas
         _downloadCancel = new CancellationTokenSource();
         var cancel = _downloadCancel.Token;
         string title = remote.DisplayTitle;
-        Say($"「{title}」をダウンロードしているよ…", $"Downloading {title}… press ダウンロード again to stop.");
+        Say($"「{title}」をダウンロードしているよ…", $"Downloading {title}… press Stop to stop.");
         var shown = Stopwatch.StartNew();
         void Progress(long received)
         {
@@ -964,7 +1465,31 @@ internal sealed class VipView : PixelCanvas
             if (remote.Original)
             {
                 Say($"「{title}」の配布元に問い合わせているよ…", $"Asking {new Uri(remote.Url!).Host} for {title}…");
-                (resolved, string? name) = await VipOriginal.ResolveAsync(remote.Url!, cancel);
+                string? name = null;
+                // An uploader's password is asked for, and remembered for its other files until the launcher closes.
+                string? password = remote.Area is { } uploader ? _uploaderPasswords.GetValueOrDefault(uploader) : null;
+                while (resolved is null)
+                {
+                    try
+                    {
+                        (resolved, name) = await VipOriginal.ResolveAsync(remote.Url!, cancel, password);
+                    }
+                    catch (PasswordRequiredException needed)
+                    {
+                        if (TopLevel.GetTopLevel(this) is not Window window) throw;
+                        var dialog = new TextPromptDialog(T("ダウンロードパスワード", "Download Password"),
+                            needed.Wrong ? T("パスワードが違うみたい。もう一度:", "Wrong password; try again:")
+                                : T("このファイルにはパスワードが要るよ。祭りのページやスレに書いてあることが多い。", "This file needs a password. It is usually on the festival page or in the thread."),
+                            "", T("ダウンロード", "Download"));
+                        if (!await dialog.ShowAsync(window) || dialog.Value.Length == 0)
+                        {
+                            Say("パスワードがないとダウンロードできない…", $"Not downloaded: {title} needs its download password.");
+                            return;
+                        }
+                        password = dialog.Value;
+                    }
+                }
+                if (password is not null && remote.Area is { } known) _uploaderPasswords[known] = password;
                 Diagnostics.Log($"VIPRPG original {remote.Url} -> {name ?? resolved}");
             }
             await Task.Run(() => VipServer.DownloadAsync(server ?? "", remote, zip, Progress, cancel, resolved), cancel);
@@ -1002,7 +1527,7 @@ internal sealed class VipView : PixelCanvas
             Diagnostics.Log($"VIPRPG download failed {remote.Url ?? remote.Path}: {ex}");
             var (japanese, english) = VipServer.Explain(ex);
             if (remote.Original && ex is NotSupportedException or InvalidDataException)
-                (japanese, english) = ("配布元から直接は取れなかった。「配布元」で開いてみてね。", ex.Message + " Try 配布元 to open the page.");
+                (japanese, english) = ("配布元から直接は取れなかった。「配布元」で開いてみてね。", ex.Message + " Try Source to open the page.");
             Say(japanese, english);
         }
         finally
@@ -1024,7 +1549,7 @@ internal sealed class VipView : PixelCanvas
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Say("ダウンロード先に書き込めない…", $"Can't write to {root}: {ex.Message}. Choose another folder under 設定 → ダウンロード先.");
+            Say("ダウンロード先に書き込めない…", $"Can't write to {root}: {ex.Message}. Choose another folder under Settings → Download Folder.");
             return null;
         }
         // Downloads have to be somewhere the scan looks, or they'd never show as owned.
@@ -1046,18 +1571,6 @@ internal sealed class VipView : PixelCanvas
         string safe = new(name.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
         safe = safe.Trim().TrimEnd('.');
         return safe is "" or "." or ".." ? "_" : safe;
-    }
-
-    private void OpenReadme(GameEntry game)
-    {
-        var files = VipReadme.Find(game.RootPath);
-        if (files.Count == 0)
-        {
-            Say("説明書は見つからなかった。", "No readme found in the game folder.");
-            return;
-        }
-        _overlay = new VipReadme(files);
-        Redraw();
     }
 
     private void OpenUrl(string? url)
@@ -1092,7 +1605,7 @@ internal sealed class VipView : PixelCanvas
         if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return;
         var picked = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "VIPRPGのゲームが入ったフォルダ",
+            Title = T("VIPRPGのゲームが入ったフォルダ", "Folder with VIPRPG Games"),
             AllowMultiple = false
         });
         if (picked.Count == 0 || picked[0].TryGetLocalPath() is not { } path) return;
@@ -1143,9 +1656,11 @@ internal sealed class VipView : PixelCanvas
     {
         _hot.Clear();
         _rowAreas.Clear();
+        _rowWords.Clear();
         _sideAreas.Clear();
         double w = size.Width, h = size.Height;
-        VipTheme theme = VipTheme.For(_sideIndex < _side.Count ? _side[_sideIndex].Matsuri : null);
+        // Colours follow the matsuri opened, not the cursor passing over the list.
+        VipTheme theme = VipTheme.For(_side.FirstOrDefault(item => Data.Selected is { } key && SideKey(item) == key)?.Matsuri);
 
         // The page behind everything: the dark tiled background of an old fan site.
         g.FillRectangle(theme.PageBrush, new Rect(0, 0, w, h));
@@ -1174,7 +1689,7 @@ internal sealed class VipView : PixelCanvas
     {
         theme.PaintBanner(g, rect, _tick);
         double logo = RetroDraw.Logo(g, "VIPRPG", rect.X + 12, rect.Y + 8, RetroDraw.Large, theme.Title, theme.LogoHighlight, theme.LogoOutline);
-        logo += RetroDraw.Logo(g, "ランチャー", rect.X + 20 + logo, rect.Y + 8, RetroDraw.Large, theme.LogoSecond, theme.LogoHighlight, theme.LogoOutline);
+        logo += RetroDraw.Logo(g, T("ランチャー", "Launcher"), rect.X + 20 + logo, rect.Y + 8, RetroDraw.Large, theme.LogoSecond, theme.LogoHighlight, theme.LogoOutline);
 
         // Tools at the right, as buttons.
         double bx = rect.Right - 8;
@@ -1196,8 +1711,7 @@ internal sealed class VipView : PixelCanvas
         double mx = rect.X + 32 + logo, width2 = bx - mx - 8;
         if (width2 > 40)
         {
-            RetroDraw.Text(g, RetroDraw.Fit(_say, width2), mx, rect.Y + 6, RetroDraw.TextColor);
-            RetroDraw.Text(g, RetroDraw.Fit(_sayEn, width2), mx, rect.Y + 23, theme.Subtitle);
+            RetroDraw.Text(g, RetroDraw.Fit(T(_say, _sayEn), width2), mx, rect.Y + 15, RetroDraw.TextColor);
         }
     }
 
@@ -1221,14 +1735,15 @@ internal sealed class VipView : PixelCanvas
     private void PaintCommands(DrawingContext g, VipTheme theme)
     {
         RetroDraw.Window(g, _listRect, theme.WindowTop, theme.WindowBottom);
-        PaintHeading(g, "一覧の種類", _listRect.Width - 16, back: false);
+        PaintHeading(g, T("一覧の種類", "Lists"), _listRect.Width - 16, back: false);
         for (int i = 0; i < _commands.Count; i++)
         {
             var command = _commands[i];
             var row = new Rect(_listRect.X + 6, _listRect.Y + 26 + i * 36, _listRect.Width - 12, 34);
-            bool active = _command == i;
+            // Nothing looks chosen until it's pointed at: the keyboard cursor shows only after a key press.
+            bool active = _command == i && _keys;
             if (active || (row.Contains(_mouse) && _overlay is null)) RetroDraw.Cursor(g, row, _tick, active);
-            RetroDraw.Text(g, (command.Mode == Data.List ? "▶" : "  ") + command.Label, row.X + 4, row.Y + 3, RetroDraw.TextColor);
+            RetroDraw.Text(g, "  " + command.Label, row.X + 4, row.Y + 3, RetroDraw.TextColor);
             RetroDraw.Text(g, RetroDraw.Fit(command.Hint, row.Width - 24), row.X + 20, row.Y + 18, RetroDraw.System);
             int index = i;
             _hot.Add(new VipHot(row, () =>
@@ -1244,10 +1759,12 @@ internal sealed class VipView : PixelCanvas
         RetroDraw.Window(g, _listRect, theme.WindowTop, theme.WindowBottom);
         string heading = Data.List switch
         {
-            VipListMode.Matsuri => "祭り別：祭りを選んでね",
-            VipListMode.Author => "作者別：作者を選んでね",
-            VipListMode.All => "全作品：絞り込みを選んでね",
-            _ => "手持ち：並べ替えか絞り込みを選んでね"
+            VipListMode.Matsuri => T("祭り別：祭りを選んでね", "By Festival: pick a festival"),
+            VipListMode.Author => T("作者別：作者を選んでね", "By Author: pick an author"),
+            VipListMode.Playlist => T("プレイリスト：選ぶか作ってね", "Playlists: pick or make one"),
+            VipListMode.All => T("全作品：絞り込みを選んでね", "All Games: pick what to show"),
+            VipListMode.Storage => T("保管庫：保管庫を選んでね", "Thread Storage: pick an archive"),
+            _ => T("手持ち：並べ替えか絞り込みを選んでね", "On This PC: pick a sort or filter")
         };
         PaintHeading(g, heading, _listRect.Width - 16, back: true);
         var list = new Rect(_listRect.X + 6, _listRect.Y + 22, _listRect.Width - 12, _listRect.Height - 30);
@@ -1263,7 +1780,7 @@ internal sealed class VipView : PixelCanvas
                 var item = _side[i];
                 var row = new Rect(list.X, list.Y + (i - _sideTop) * 16, list.Width, 16);
                 _sideAreas.Add(row);
-                if (i == _sideIndex) RetroDraw.Cursor(g, row, _tick, _focus == Pane.Side);
+                if (i == _sideIndex && _keys) RetroDraw.Cursor(g, row, _tick, _focus == Pane.Side);
                 else if (row.Contains(_mouse) && _overlay is null) RetroDraw.Fill(g, row.Deflate(1), Color.FromArgb(40, 255, 255, 255));
                 if (item.Total == Heading)
                 {
@@ -1275,17 +1792,13 @@ internal sealed class VipView : PixelCanvas
                 double countWidth = RetroDraw.Width(count);
                 bool isNew = item.Matsuri?.Year >= DateTime.Now.Year - 1 && _tick / 8 % 2 == 0;
                 string label = RetroDraw.Fit(item.Label, row.Width - countWidth - (isNew ? 30 : 10));
+                if (PinKey(item) is { } pin && Data.Pinned.Contains(pin)) label = "◎" + label;
                 double labelWidth = RetroDraw.Text(g, (chosen ? "▶" : "") + label, row.X + 3, row.Y + 2,
-                    chosen ? RetroDraw.Yellow : item.Owned > 0 || item.Total == NoCount ? RetroDraw.TextColor : RetroDraw.Disabled);
+                    RetroDraw.TextColor);
                 if (isNew) RetroDraw.Text(g, "NEW", row.X + 6 + labelWidth, row.Y + 2, RetroDraw.Red);
-                RetroDraw.Text(g, count, row.Right - countWidth - 3, row.Y + 2, item.Owned > 0 ? RetroDraw.Yellow : RetroDraw.Disabled);
+                RetroDraw.Text(g, count, row.Right - countWidth - 3, row.Y + 2, RetroDraw.TextColor);
                 int index = i;
-                _hot.Add(new VipHot(row, () =>
-                {
-                    SelectSide(index);
-                    // Choosing opens its works.
-                    _focus = Pane.Rows;
-                }));
+                _hot.Add(new VipHot(row, () => OpenSide(index)));
             }
         }
         if (_sideTop > 0) RetroDraw.MoreArrow(g, _listRect.Center.X, _listRect.Y + 16, _tick, down: false);
@@ -1297,38 +1810,62 @@ internal sealed class VipView : PixelCanvas
         RetroDraw.Window(g, _listRect, theme.WindowTop, theme.WindowBottom);
         var item = _sideIndex < _side.Count ? _side[_sideIndex] : null;
         string heading = Data.List == VipListMode.Owned
-            ? $"手持ち（{OwnedSorts.FirstOrDefault(sort => sort.Key == Data.OwnedSort).Label ?? "タイトル順"}・{_side.FirstOrDefault(i => i.Filter == Data.OwnedFilter)?.Label.TrimStart('★', '■', ' ') ?? "すべて"}）"
-            : item?.Filter is { } filter ? filter == "*fav" ? "お気に入り"
-                : filter.StartsWith("group:", StringComparison.Ordinal) ? "グループ：" + filter["group:".Length..] : "全作品（名前順）"
-            : item?.Matsuri is { } matsuri ? $"{matsuri.Name}　参加作品一覧"
-            : item?.Author is { } author ? $"{author}さんの作品"
-            : item?.Strays == true ? "その他のゲーム（wikiにない作品）"
-            : item?.Server == true ? (item.Area == "*server" ? "サーバーの作品（スレ作品など）" : $"{item.Label}（アップローダー保存庫）")
-            : $"手持ち（{OwnedSorts.FirstOrDefault(sort => sort.Key == Data.OwnedSort).Label ?? "タイトル順"}・{_side.FirstOrDefault(i => i.Filter == Data.OwnedFilter)?.Label.TrimStart('★', '■', ' ') ?? "すべて"}）";
+            ? T("手持ち", "On This PC") + $"（{OwnedSorts.FirstOrDefault(sort => sort.Key == Data.OwnedSort).Label ?? T("タイトル順", "By Title")}・{_side.FirstOrDefault(i => i.Filter == Data.OwnedFilter)?.Label.TrimStart('★', '■', ' ') ?? T("すべて", "All")}）"
+            : item?.Filter is { } shown && shown.StartsWith(PlaylistFilter, StringComparison.Ordinal) ? T("プレイリスト：", "Playlist: ") + shown[PlaylistFilter.Length..]
+            : item?.Filter is { } filter ? filter == "*fav" ? T("お気に入り", "Favorites")
+                : filter.StartsWith("group:", StringComparison.Ordinal) ? T("グループ：", "Group: ") + filter["group:".Length..] : T("全作品（名前順）", "All Games (by title)")
+            : item?.Matsuri is { } matsuri ? matsuri.Name + T("　参加作品一覧", " — entries")
+            : item?.Author is { } author ? T($"{author}さんの作品", $"Works by {author}")
+            : item?.Strays == true ? T("その他のゲーム（wikiにない作品）", "Other Games (not on the wiki)")
+            : item?.Server == true ? (item.Area == "*server" ? T("サーバーの作品（スレ作品など）", "Server Games (thread games and more)") : item.Label + T("（アップローダー保存庫）", " (Uploader Archive)"))
+            : T("手持ち", "On This PC") + $"（{OwnedSorts.FirstOrDefault(sort => sort.Key == Data.OwnedSort).Label ?? T("タイトル順", "By Title")}・{_side.FirstOrDefault(i => i.Filter == Data.OwnedFilter)?.Label.TrimStart('★', '■', ' ') ?? T("すべて", "All")}）";
         // The search box sits at the right of the heading.
         double searchWidth = Math.Min(200, Math.Floor(_listRect.Width * 0.42));
         _searchRect = new Rect(_listRect.Right - 8 - searchWidth, _listRect.Y + 5, searchWidth, 15);
-        PaintHeading(g, heading, _listRect.Width - 24 - searchWidth, back: true);
+        double headingWidth = _listRect.Width - 24 - searchWidth;
+        if (HasFilterMenu)
+        {
+            // The menu button, between the heading and the search box.
+            string label = Data.List == VipListMode.Owned ? T("並べ替え・絞り込み▼", "Sort / Filter ▼") : T("絞り込み▼", "Show ▼");
+            double buttonWidth = RetroDraw.Width(label) + 10;
+            var button = new Rect(_searchRect.X - buttonWidth - 6, _listRect.Y + 4, buttonWidth, 17);
+            bool hover = button.Contains(_mouse) && _overlay is null;
+            RetroDraw.Fill(g, button, hover ? Color.FromArgb(110, 255, 255, 255) : Color.FromArgb(110, 0, 0, 0));
+            RetroDraw.Outline(g, button, hover ? Colors.White : Color.FromArgb(160, 255, 255, 255));
+            RetroDraw.Text(g, label, button.X + 5, button.Y + 2, RetroDraw.Yellow);
+            _hot.Add(new VipHot(button, () => OpenFilterMenu(new Point(button.X, button.Bottom + 2))));
+            headingWidth -= buttonWidth + 6;
+        }
+        // A matsuri or playlist shows how much of it is completed, at the right of the heading.
+        bool playlist = item?.Filter?.StartsWith(PlaylistFilter, StringComparison.Ordinal) == true;
+        if (Data.List != VipListMode.Owned && (item?.Matsuri is not null || playlist) && _completedCount.Total > 0)
+        {
+            string done = T("クリア済み", "Completed:") + $" {_completedCount.Done}/{_completedCount.Total}";
+            double doneWidth = RetroDraw.Width(done);
+            RetroDraw.Text(g, done, _searchRect.X - doneWidth - 8, _listRect.Y + 6, RetroDraw.System);
+            headingWidth -= doneWidth + 8;
+        }
+        PaintHeading(g, heading, headingWidth, back: true);
 
         double x = _listRect.X + 6, width = _listRect.Width - 12;
-        double noWidth = Data.List == VipListMode.Matsuri ? 32 : Math.Min(110, width * 0.22);
-        double stateWidth = 22, authorWidth = Data.List == VipListMode.Author ? 0 : Math.Min(130, width * 0.28);
+        // 保管庫's games have no festival or author to show: the title gets the whole line.
+        bool storage = Data.List == VipListMode.Storage;
+        double noWidth = storage ? 0 : Data.List == VipListMode.Matsuri ? 32 : Math.Min(110, width * 0.22);
+        double stateWidth = 22, authorWidth = Data.List == VipListMode.Author || storage ? 0 : Math.Min(130, width * 0.28);
         double titleWidth = width - noWidth - stateWidth - authorWidth - 12;
         double headerY = _listRect.Y + 22;
         RetroDraw.Fill(g, new Rect(x, headerY + 15, width, 1), Color.FromArgb(120, 200, 210, 255));
-        RetroDraw.Text(g, Data.List == VipListMode.Matsuri ? "No." : "祭り", x + 3, headerY + 1, RetroDraw.System);
-        RetroDraw.Text(g, "タイトル", x + noWidth + stateWidth + 3, headerY + 1, RetroDraw.System);
-        if (authorWidth > 0) RetroDraw.Text(g, "作者", x + width - authorWidth, headerY + 1, RetroDraw.System);
+        if (!storage) RetroDraw.Text(g, Data.List == VipListMode.Matsuri ? "No." : T("祭り", "Festival"), x + 3, headerY + 1, RetroDraw.System);
+        RetroDraw.Text(g, T("タイトル", "Title"), x + noWidth + stateWidth + 3, headerY + 1, RetroDraw.System);
+        if (authorWidth > 0) RetroDraw.Text(g, T("作者", "Author"), x + width - authorWidth, headerY + 1, RetroDraw.System);
 
         var list = new Rect(x, headerY + 18, width, _listRect.Bottom - headerY - 26);
         _rowsVisible = Math.Max(1, (int)(list.Height / 16));
         _rowTop = Math.Clamp(_rowTop, 0, Math.Max(0, _rows.Count - _rowsVisible));
-        if (_rowIndex < _rowTop) _rowTop = _rowIndex;
-        if (_rowIndex >= _rowTop + _rowsVisible) _rowTop = _rowIndex - _rowsVisible + 1;
 
         if (_rows.Count == 0)
         {
-            string empty = _scanning ? "調べています…" : "作品がありません";
+            string empty = _scanning ? T("調べています…", "Scanning…") : T("作品がありません", "No games");
             RetroDraw.Text(g, empty, list.X + 8, list.Y + 4, RetroDraw.Disabled);
         }
 
@@ -1344,30 +1881,54 @@ internal sealed class VipView : PixelCanvas
 
                 bool owned = row.Local is not null;
                 bool running = owned && _running.GetValueOrDefault(row.Local!.RootPath) > 0;
-                var color = owned ? RetroDraw.TextColor : RetroDraw.Disabled;
-                RetroDraw.Text(g, RetroDraw.Fit(row.No, noWidth - 4), rect.X + 3, rect.Y + 2, owned ? RetroDraw.Yellow : RetroDraw.Disabled);
+                // One colour whether the game is here or not (the state mark says which); red only for playlist
+                // entries the launcher can't find at all.
+                var color = row.Missing is not null ? RetroDraw.Red : RetroDraw.TextColor;
+                // Where this row's words are: a right-click anywhere else on it goes back instead of opening its menu.
+                var words = new List<Rect>();
+                _rowWords.Add(words);
+                void Words(double from, double width)
+                {
+                    if (width > 0) words.Add(new Rect(from - 2, rect.Y, width + 4, rect.Height));
+                }
+                if (noWidth > 0)
+                    Words(rect.X + 3, RetroDraw.Text(g, RetroDraw.Fit(row.No, noWidth - 4), rect.X + 3, rect.Y + 2, color));
                 bool fetching = row.Remote is not null && ReferenceEquals(row.Remote, _downloading);
                 bool remote = !owned && row.Zip is null && row.Remote is not null;
-                string state = running ? "●" : owned ? "▶" : row.Zip is not null ? "Z" : fetching ? (_tick / 4 % 2 == 0 ? "↓" : "") : remote ? "↓" : "・";
-                RetroDraw.Text(g, state, rect.X + noWidth + 4, rect.Y + 2,
+                // エ: never submitted, so no download exists anywhere.
+                bool eternal = !owned && row.Zip is null && !remote && row.Work?.Eternal == true;
+                string state = running ? "●" : owned ? "▶" : row.Zip is not null ? "Z" : fetching ? (_tick / 4 % 2 == 0 ? "↓" : "") : remote ? "↓"
+                    : eternal ? T("エ", "E") : "・";
+                double stateX = rect.X + noWidth + 4;
+                RetroDraw.Text(g, state, stateX, rect.Y + 2,
                     running ? RetroDraw.Red : owned ? RetroDraw.Green : row.Zip is not null ? RetroDraw.Yellow
-                    : fetching ? RetroDraw.Yellow : remote ? RetroDraw.System : RetroDraw.Disabled);
+                    : fetching ? RetroDraw.Yellow : remote ? RetroDraw.System : eternal ? RetroDraw.Red : RetroDraw.Disabled);
                 double titleX = rect.X + noWidth + stateWidth + 3;
                 if (IsFavorite(row)) titleX += RetroDraw.Text(g, "★", titleX, rect.Y + 2, RetroDraw.Yellow);
-                RetroDraw.Text(g, RetroDraw.Fit(row.Title, titleWidth - (titleX - rect.X - noWidth - stateWidth - 3)), titleX, rect.Y + 2, color);
+                if (IsCompleted(row)) titleX += RetroDraw.Text(g, T("（済）", "(✓)"), titleX, rect.Y + 2, RetroDraw.Green);
+                double titleEnd = titleX + RetroDraw.Text(g, RetroDraw.Fit(row.Title, titleWidth - (titleX - rect.X - noWidth - stateWidth - 3)), titleX, rect.Y + 2, color);
+                // The state mark through the end of the title counts as one stretch of words.
+                Words(stateX, titleEnd - stateX);
                 if (authorWidth > 0)
-                    RetroDraw.Text(g, RetroDraw.Fit(row.Author, authorWidth - 4), rect.Right - authorWidth, rect.Y + 2,
-                        owned ? RetroDraw.System : RetroDraw.Disabled);
+                    Words(rect.Right - authorWidth, RetroDraw.Text(g, RetroDraw.Fit(row.Author, authorWidth - 4), rect.Right - authorWidth, rect.Y + 2,
+                        RetroDraw.TextColor));
                 int index = i;
                 _hot.Add(new VipHot(rect, () =>
                 {
-                    if (_focus == Pane.Rows && _rowIndex == index && row.Local is not null) Play(row);
+                    // Clicking the chosen game again plays it, or starts downloading it when it isn't here yet.
+                    if (_focus == Pane.Rows && _rowIndex == index)
+                    {
+                        if (row.Local is not null) Play(row);
+                        else if (row.Zip is null && row.Remote is { } download && !ReferenceEquals(download, _downloading))
+                            _ = DownloadAsync(download);
+                    }
                     _focus = Pane.Rows;
                     SelectRow(index);
                 }));
             }
         }
-        if (_rowTop > 0) RetroDraw.MoreArrow(g, _listRect.Center.X, headerY + 20, _tick, down: false);
+        // In the header line, between the column names, so it never covers the first game.
+        if (_rowTop > 0) RetroDraw.MoreArrow(g, _listRect.Center.X, headerY + 8, _tick, down: false);
         if (_rowTop + _rowsVisible < _rows.Count) RetroDraw.MoreArrow(g, _listRect.Center.X, _listRect.Bottom - 7, _tick);
     }
 
@@ -1377,39 +1938,34 @@ internal sealed class VipView : PixelCanvas
         var row = SelectedRow;
         double x = _detailRect.X + 8, y = _detailRect.Y + 8, width = _detailRect.Width - 16;
         _pictureBitmap = null;
-        if (row is null || _focus != Pane.Rows && _rows.Count == 0)
-        {
-            RetroDraw.Text(g, "作品を選んでね", x, y, RetroDraw.Disabled);
-            return;
-        }
+        if (row is null || _focus != Pane.Rows) return;
 
         // Buttons first, so the picture can take the room the text and buttons leave.
         // Buttons, like a shop's command window.
         var buttons = new List<(string Label, Action Run, bool Enabled)>();
         if (row.Local is { } owned)
         {
-            buttons.Add(("遊ぶ", () => Play(row), true));
-            if (EngineFamilies.HasTestMode(owned.Family)) buttons.Add(("テスト", () => Play(row, testPlay: true), true));
-            buttons.Add(("説明書", () => OpenReadme(owned), true));
-            buttons.Add(("フォルダ", () => OpenFolder(owned.RootPath), true));
+            buttons.Add((T("遊ぶ", "Play"), () => Play(row), true));
+            if (EngineFamilies.HasTestMode(owned.Family)) buttons.Add((T("テスト", "Test"), () => Play(row, testPlay: true), true));
+            buttons.Add((T("フォルダ", "Folder"), () => OpenFolder(owned.RootPath), true));
         }
         else if (row.Zip is { } zip)
         {
-            buttons.Add(("展開", () => _ = ExtractAsync(zip), true));
-            buttons.Add(("フォルダ", () => Shell.ShowInFileManager(zip), true));
+            buttons.Add((T("展開", "Extract"), () => _ = ExtractAsync(zip), true));
+            buttons.Add((T("フォルダ", "Folder"), () => Shell.ShowInFileManager(zip), true));
         }
         else if (row.Remote is { } download)
         {
-            buttons.Add((ReferenceEquals(download, _downloading) ? "中止" : "ダウンロード", () => _ = DownloadAsync(download), true));
+            buttons.Add((ReferenceEquals(download, _downloading) ? T("中止", "Stop") : T("ダウンロード", "Download"), () => _ = DownloadAsync(download), true));
         }
-        if (row.Work?.Downloads?.FirstOrDefault() is { } original) buttons.Add(("配布元", () => OpenUrl(original), true));
+        if (row.Work?.Downloads?.FirstOrDefault() is { } original) buttons.Add((T("配布元", "Source"), () => OpenUrl(original), true));
         if (row.Work?.WikiUrl is { } wiki) buttons.Add(("wiki", () => OpenUrl(wiki), true));
-        if (row.Work?.ForumUrl is { } forum) buttons.Add(("感想スレ", () => OpenUrl(forum), true));
+        if (row.Work?.ForumUrl is { } forum) buttons.Add((T("感想スレ", "Thread"), () => OpenUrl(forum), true));
         if (row.Work?.Event is { } eventInfo)
         {
-            if (eventInfo.ArchiveUrl is { } archive) buttons.Add(("祭りページ", () => OpenUrl(archive), true));
-            if (eventInfo.SiteUrl is { } site) buttons.Add(("公式サイト", () => OpenUrl(site), true));
-            else if (eventInfo.WikiUrl is { } matsuriWiki) buttons.Add(("祭りwiki", () => OpenUrl(matsuriWiki), true));
+            if (eventInfo.ArchiveUrl is { } archive) buttons.Add((T("祭りページ", "Festival Page"), () => OpenUrl(archive), true));
+            if (eventInfo.SiteUrl is { } site) buttons.Add((T("公式サイト", "Website"), () => OpenUrl(site), true));
+            else if (eventInfo.WikiUrl is { } matsuriWiki) buttons.Add((T("祭りwiki", "Festival Wiki"), () => OpenUrl(matsuriWiki), true));
         }
 
         // The picture: 4:3, as large as leaves room for six lines of text and the buttons.
@@ -1418,16 +1974,25 @@ internal sealed class VipView : PixelCanvas
         double room = _detailRect.Bottom - 8 - 18 * buttonRows - 4 - 6 - 16 - 15 * 5;
         double pictureWidth = Math.Floor(Math.Min(width, (room - y) * 4 / 3));
         var picture = new Rect(x + Math.Floor((width - pictureWidth) / 2), y, pictureWidth, Math.Floor(pictureWidth * 3 / 4));
-        RetroDraw.Fill(g, picture.Inflate(1), RetroDraw.FrameOuter);
-        RetroDraw.Fill(g, picture, Colors.Black);
         // The game's own title screen, else the picture from its matsuri's site.
-        var bitmap = row.Local is { } game ? TitleFor(game) : null;
-        if (bitmap is null && row.Work is { } pictured) bitmap = ThumbFor(pictured);
+        // The built-in picture when there is one, else the game's own title screen once it's on the PC.
+        var bitmap = row.Work is { } pictured && VipThumbs.Has(pictured) ? ThumbFor(pictured)
+            : row.Local is { } game ? TitleFor(game) : null;
         _pictureBitmap = bitmap;
         _pictureRect = picture;
-        if (bitmap is null)
+        if (bitmap is not null)
         {
-            string text = row.Local is not null ? "NO IMAGE" : "NO IMAGE（未所持）";
+            // Just a frame around the picture as it will be shown (see PlacePicture), with no box behind it.
+            var (shownWidth, shownHeight) = PictureSize(bitmap, picture.Width * Zoom, picture.Height * Zoom);
+            var shown = new Rect(picture.Center.X - shownWidth / Zoom / 2, picture.Center.Y - shownHeight / Zoom / 2,
+                shownWidth / Zoom, shownHeight / Zoom);
+            RetroDraw.Fill(g, RetroDraw.Snap(shown).Inflate(1), RetroDraw.FrameOuter);
+        }
+        else
+        {
+            RetroDraw.Fill(g, picture.Inflate(1), RetroDraw.FrameOuter);
+            RetroDraw.Fill(g, picture, Colors.Black);
+            string text = row.Local is not null ? "NO IMAGE" : T("NO IMAGE（未所持）", "NO IMAGE (not on this PC)");
             RetroDraw.Text(g, text, picture.Center.X - RetroDraw.Width(text) / 2, picture.Center.Y - 6, RetroDraw.Disabled);
         }
         y = picture.Bottom + 6;
@@ -1435,37 +2000,39 @@ internal sealed class VipView : PixelCanvas
         // Lines that would run into the buttons are left out.
         double limit = _detailRect.Bottom - 8 - 18 * buttonRows - 4;
         double Add(string label, string value) => y + 16 > limit ? 0 : Line(g, label, value, x, y, width);
-        string state = row.Local is not null ? "" : row.Zip is not null ? "  [zip]" : row.Remote is not null ? "  [未所持 ↓]" : "  [未所持]";
+        string state = row.Local is not null ? (IsCompleted(row) ? T("  [クリア済み]", "  [completed]") : "") : row.Zip is not null ? "  [zip]" : row.Remote is not null ? T("  [未所持 ↓]", "  [not on this PC ↓]")
+            : row.Work?.Eternal == true ? T("  [エターナル（未提出）]", "  [eternal (never submitted)]")
+            : row.Missing is not null ? T("  [ランチャーに見つからない]", "  [not found by the launcher]") : T("  [未所持]", "  [not on this PC]");
         double titleWidth = RetroDraw.Text(g, RetroDraw.Fit(row.Title, width - RetroDraw.Width(state)), x, y, RetroDraw.TextColor);
         RetroDraw.Text(g, state, x + titleWidth, y, row.Remote is not null && row.Local is null ? RetroDraw.System : RetroDraw.Disabled);
         y += 16;
         if (row.Work is { } work)
         {
-            if (!string.IsNullOrWhiteSpace(work.Author)) y += Add("作者", work.Author!);
+            if (!string.IsNullOrWhiteSpace(work.Author)) y += Add(T("作者", "Author"), work.Author!);
             if (work.Event is { } matsuri)
-                y += Add("祭り", matsuri.Name + (string.IsNullOrWhiteSpace(work.No) ? "" : $"  No.{work.No}"));
-            if (!string.IsNullOrWhiteSpace(work.Genre)) y += Add("ジャンル", work.Genre!);
+                y += Add(T("祭り", "Festival"), matsuri.Name + (string.IsNullOrWhiteSpace(work.No) ? "" : $"  No.{work.No}"));
+            if (!string.IsNullOrWhiteSpace(work.Genre)) y += Add(T("ジャンル", "Genre"), work.Genre!);
         }
         else if (row.Remote is { } info)
         {
-            if (!string.IsNullOrWhiteSpace(info.Author)) y += Add("作者", info.Author!);
-            if (!string.IsNullOrWhiteSpace(info.Thread)) y += Add("スレ", info.Thread!);
-            if (info.Year is { } year) y += Add("年", year.ToString());
-            if (!string.IsNullOrWhiteSpace(info.Engine)) y += Add("ツール", info.Engine!);
-            if (!string.IsNullOrWhiteSpace(info.Note)) y += Add("メモ", info.Note!);
+            if (!string.IsNullOrWhiteSpace(info.Author)) y += Add(T("作者", "Author"), info.Author!);
+            if (!string.IsNullOrWhiteSpace(info.Thread)) y += Add(T("スレ", "Thread"), info.Thread!);
+            if (info.Year is { } year) y += Add(T("年", "Year"), year.ToString());
+            if (!string.IsNullOrWhiteSpace(info.Engine)) y += Add(T("ツール", "Engine"), info.Engine!);
+            if (!string.IsNullOrWhiteSpace(info.Note)) y += Add(T("メモ", "Note"), info.Note!);
         }
         if (row.Local is { } local)
         {
-            y += Add("ツール", local.Engine);
+            y += Add(T("ツール", "Engine"), local.Engine);
             if (Data.Games.TryGetValue(local.RootPath, out var record) && record.PlayCount > 0)
-                y += Add("プレイ", $"{record.PlayCount}回 ／ {Look.FormatDuration(Math.Max(1, record.PlaySeconds))}");
+                y += Add(T("プレイ", "Played"), T($"{record.PlayCount}回", $"{record.PlayCount}×") + $" ／ {Look.FormatDuration(Math.Max(1, record.PlaySeconds))}");
         }
         else if (row.Zip is null && row.Remote is { } server)
         {
             string size = ReferenceEquals(server, _downloading) && server.Size > 0
                 ? $"{Look.FormatBytes(_downloaded)} / {Look.FormatBytes(server.Size)}"
                 : server.Size > 0 ? Look.FormatBytes(server.Size) : "?";
-            y += Add("サーバー", size);
+            y += Add(T("サーバー", "Server"), size);
         }
 
 
@@ -1492,7 +2059,13 @@ internal sealed class VipView : PixelCanvas
     }
 
     /// <summary>A game's title screen, loaded in the background on first use.</summary>
-    private Bitmap? TitleFor(GameEntry game) => Picture(game.RootPath, () => GameImageLoader.LoadSourcePicture(game));
+    private Bitmap? TitleFor(GameEntry game) => Picture(game.RootPath, () =>
+    {
+        using var image = GameImageLoader.LoadSourceImage(game);
+        // The RTP's stock skies and books say nothing about the game.
+        if (image is null || game.Family == EngineFamily.Rm2k && Rm2kStockTitles.IsStock(image)) return null;
+        return ImageKit.ToAvalonia(image);
+    });
 
     /// <summary>A work's picture from the matsuri's site (built into the launcher), loaded on first use.</summary>
     private Bitmap? ThumbFor(VipWork work) =>
@@ -1557,6 +2130,17 @@ internal sealed class VipView : PixelCanvas
     /// The picture over its box at the screen's resolution: pixel art (320×240 or smaller) by whole steps with
     /// hard edges, anything larger smoothly scaled to fit.
     /// </summary>
+    private static bool IsPixelArt(Bitmap bitmap) => bitmap.PixelSize.Width <= 320 && bitmap.PixelSize.Height <= 240;
+
+    /// <summary>A picture's size in device pixels inside a box: pixel art by whole steps, anything else to fit.</summary>
+    private static (double Width, double Height) PictureSize(Bitmap bitmap, double boxWidth, double boxHeight)
+    {
+        double sourceWidth = bitmap.PixelSize.Width, sourceHeight = bitmap.PixelSize.Height;
+        double fit = Math.Min(boxWidth / sourceWidth, boxHeight / sourceHeight);
+        if (IsPixelArt(bitmap) && fit >= 1) fit = Math.Floor(fit);
+        return (Math.Round(sourceWidth * fit), Math.Round(sourceHeight * fit));
+    }
+
     private void PlacePicture()
     {
         if (_pictureBitmap is not { } bitmap || _overlay is not null || _pictureRect.Width <= 0)
@@ -1567,11 +2151,9 @@ internal sealed class VipView : PixelCanvas
         double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
         var box = FromCanvas(_pictureRect);
         double boxWidth = box.Width * scaling, boxHeight = box.Height * scaling;
-        double sourceWidth = bitmap.PixelSize.Width, sourceHeight = bitmap.PixelSize.Height;
-        double fit = Math.Min(boxWidth / sourceWidth, boxHeight / sourceHeight);
-        bool pixelArt = sourceWidth <= 320 && sourceHeight <= 240;
-        if (pixelArt && fit >= 1) fit = Math.Floor(fit);
-        double width = Math.Round(sourceWidth * fit) / scaling, height = Math.Round(sourceHeight * fit) / scaling;
+        var (deviceWidth, deviceHeight) = PictureSize(bitmap, boxWidth, boxHeight);
+        bool pixelArt = IsPixelArt(bitmap);
+        double width = deviceWidth / scaling, height = deviceHeight / scaling;
         var margin = new Thickness(Math.Round((box.X + (box.Width - width) / 2) * scaling) / scaling,
             Math.Round((box.Y + (box.Height - height) / 2) * scaling) / scaling, 0, 0);
         if (!ReferenceEquals(_picture.Source, bitmap)) _picture.Source = bitmap;
@@ -1587,7 +2169,9 @@ internal sealed class VipView : PixelCanvas
     protected override void OnPointerMoved(PointerEventArgs e)
     {
         base.OnPointerMoved(e);
-        _mouse = ToCanvas(e.GetPosition(this));
+        var mouse = ToCanvas(e.GetPosition(this));
+        if (mouse != _mouse) _keys = false;
+        _mouse = mouse;
         Redraw();
     }
 
@@ -1610,7 +2194,8 @@ internal sealed class VipView : PixelCanvas
             if (_overlay is null)
             {
                 int row = _rowAreas.FindIndex(area => area.Contains(point));
-                if (row >= 0)
+                // Only over a game's words: the empty part of its line is background, and goes back.
+                if (row >= 0 && row < _rowWords.Count && _rowWords[row].Any(words => words.Contains(point)))
                 {
                     _focus = Pane.Rows;
                     SelectRow(_rowTop + row);
@@ -1618,6 +2203,23 @@ internal sealed class VipView : PixelCanvas
                     return;
                 }
                 int side = _sideAreas.FindIndex(area => area.Contains(point));
+                if (side >= 0 && _sideTop + side < _side.Count && _side[_sideTop + side].Author is { } author)
+                {
+                    OpenAuthorMenu(author, point);
+                    return;
+                }
+                if (side >= 0 && _sideTop + side < _side.Count && _side[_sideTop + side].Matsuri is { } matsuri)
+                {
+                    _overlay = new VipMenu(point, new List<VipMenu.Item> { PinItem("matsuri:" + matsuri.Id) }, CloseOverlay);
+                    Redraw();
+                    return;
+                }
+                if (side >= 0 && _sideTop + side < _side.Count && _side[_sideTop + side].Filter is { } list &&
+                    list.StartsWith(PlaylistFilter, StringComparison.Ordinal))
+                {
+                    OpenPlaylistMenu(list[PlaylistFilter.Length..], point);
+                    return;
+                }
                 if (side >= 0 && _sideTop + side < _side.Count && _side[_sideTop + side].Filter is { } filter &&
                     filter.StartsWith("group:", StringComparison.Ordinal))
                 {
@@ -1655,22 +2257,24 @@ internal sealed class VipView : PixelCanvas
         Redraw();
     }
 
-    /// <summary>After a wheel scroll, moves each cursor inside its window, as a list box does.</summary>
+    /// <summary>After a wheel scroll: keeps the lists in range, and the matsuri list's keyboard cursor in view.</summary>
     private void KeepCursorsVisible()
     {
         _sideTop = Math.Clamp(_sideTop, 0, Math.Max(0, _side.Count - _sideVisible));
         _rowTop = Math.Clamp(_rowTop, 0, Math.Max(0, _rows.Count - _rowsVisible));
-        if (_rowIndex < _rowTop) _rowIndex = _rowTop;
-        if (_rowIndex >= _rowTop + _rowsVisible) _rowIndex = Math.Min(_rows.Count - 1, _rowTop + _rowsVisible - 1);
-        if (_sideIndex < _sideTop || _sideIndex >= _sideTop + _sideVisible)
+        // The matsuri list's cursor moves along without opening anything, so the list doesn't snap back to it.
+        if (_side.Count > 0 && (_sideIndex < _sideTop || _sideIndex >= _sideTop + _sideVisible))
         {
-            // The side cursor picks the list shown, so it stays put; scrolling just shows other entries.
+            int index = Math.Clamp(_sideIndex, _sideTop, Math.Min(_side.Count, _sideTop + _sideVisible) - 1);
+            while (index < _side.Count - 1 && _side[index].Total == Heading) index++;
+            _sideIndex = index;
         }
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
+        _keys = true;
         if (_overlay is not null)
         {
             if (!_overlay.OnKey(e.Key)) CloseOverlay();
@@ -1704,7 +2308,6 @@ internal sealed class VipView : PixelCanvas
                 break;
             case Key.D when SelectedRow is { Local: null, Zip: null, Remote: { } remote }: _ = DownloadAsync(remote); break;
             // Shortcuts for the selected work.
-            case Key.R when SelectedRow?.Local is { } local: OpenReadme(local); break;
             case Key.T when SelectedRow is { Local: { } game } row && EngineFamilies.HasTestMode(game.Family): Play(row, testPlay: true); break;
             case Key.F when SelectedRow?.Local is { } local: OpenFolder(local.RootPath); break;
             case Key.W when SelectedRow?.Work?.WikiUrl is { } wiki: OpenUrl(wiki); break;
@@ -1745,7 +2348,7 @@ internal sealed class VipView : PixelCanvas
                 _commands[_command].Run();
                 break;
             case Pane.Side:
-                _focus = Pane.Rows;
+                OpenSide(_sideIndex);
                 break;
             default:
                 if (SelectedRow is { } row) Play(row);
@@ -1761,7 +2364,7 @@ internal sealed class VipView : PixelCanvas
             return;
         }
         // Up a page: works → their matsuri/author/filter → the list modes.
-        _focus = _focus == Pane.Rows ? Pane.Side : Pane.Commands;
+        _focus = _focus == Pane.Rows && !HasFilterMenu ? Pane.Side : Pane.Commands;
         if (_focus == Pane.Commands) _command = Math.Max(0, _commands.FindIndex(c => c.Mode == Data.List));
         Redraw();
     }

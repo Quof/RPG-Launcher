@@ -1,9 +1,11 @@
+using static RpgLauncher.VipText;
+
 namespace RpgLauncher;
 
 /// <summary>A clickable area of the VIPRPG screen, recorded while painting.</summary>
 internal sealed record VipHot(Rect Area, Action Click, string? Hint = null);
 
-/// <summary>A window drawn over the VIPRPG screen that takes the keys while it is open (readme, settings).</summary>
+/// <summary>A window drawn over the VIPRPG screen that takes the keys while it is open (settings, menus).</summary>
 internal abstract class VipOverlay
 {
     public Rect Area { get; protected set; }
@@ -24,153 +26,10 @@ internal abstract class VipOverlay
         RetroDraw.Snap(new Rect((size.Width - width) / 2, (size.Height - height) / 2, width, height));
 }
 
-/// <summary>A game's readme files, shown in a message window: VIPRPG games are explained in their .txt files.</summary>
-internal sealed class VipReadme : VipOverlay
-{
-    private const double LineHeight = 14;
-    private const long MaxBytes = 512 * 1024;
-
-    private static readonly string[] Preferred = { "readme", "read me", "説明", "はじめに", "取扱", "読んで", "manual" };
-
-    private readonly List<string> _files;
-    private int _file;
-    private List<string> _lines = new();
-    private double _wrapWidth;
-    private int _top, _visible = 1;
-
-    public VipReadme(List<string> files)
-    {
-        _files = files;
-    }
-
-    /// <summary>Text files in the game folder and its first-level subfolders, likely readmes first.</summary>
-    public static List<string> Find(string folder)
-    {
-        var files = new List<string>();
-        try
-        {
-            files.AddRange(Directory.EnumerateFiles(folder, "*.txt", new EnumerationOptions
-            {
-                RecurseSubdirectories = true, MaxRecursionDepth = 1, IgnoreInaccessible = true, MatchCasing = MatchCasing.CaseInsensitive
-            }).Where(path => new FileInfo(path).Length is > 0 and <= MaxBytes));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // an unreadable folder has no readme to show
-        }
-        int Rank(string path)
-        {
-            string name = Path.GetFileName(path).ToLowerInvariant();
-            int index = Array.FindIndex(Preferred, word => name.Contains(word));
-            return index < 0 ? Preferred.Length : index;
-        }
-        return files.OrderBy(Rank).ThenBy(path => path.Count(ch => ch == Path.DirectorySeparatorChar))
-            .ThenBy(path => path, StringComparer.OrdinalIgnoreCase).Take(12).ToList();
-    }
-
-    private void Load(double width)
-    {
-        _wrapWidth = width;
-        _lines = new List<string>();
-        string text;
-        try
-        {
-            text = TextFiles.Decode(File.ReadAllBytes(_files[_file]));
-        }
-        catch (Exception ex)
-        {
-            text = "読めませんでした: " + ex.Message;
-        }
-        foreach (string raw in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-        {
-            string line = raw.Replace("\t", "    ");
-            if (line.Length == 0)
-            {
-                _lines.Add("");
-                continue;
-            }
-            // Wrap by measured width: the files mix half- and full-width characters.
-            while (line.Length > 0)
-            {
-                int take = line.Length;
-                while (take > 1 && RetroDraw.Width(line[..take]) > width) take = Math.Max(1, take * 9 / 10);
-                while (take < line.Length && RetroDraw.Width(line[..(take + 1)]) <= width) take++;
-                _lines.Add(line[..take]);
-                line = line[take..];
-            }
-        }
-        _top = 0;
-    }
-
-    public override void Paint(DrawingContext g, Size size, int tick, List<VipHot> hot, Point mouse)
-    {
-        Area = Centered(size, Math.Min(size.Width - 40, 720), size.Height - 40);
-        RetroDraw.Fill(g, new Rect(size), Color.FromArgb(120, 0, 0, 0));
-        RetroDraw.Window(g, Area);
-
-        // File tabs.
-        double x = Area.X + 8;
-        for (int i = 0; i < _files.Count; i++)
-        {
-            string name = RetroDraw.Fit(Path.GetFileName(_files[i]), 150);
-            var tab = new Rect(x, Area.Y + 6, RetroDraw.Width(name) + 10, 16);
-            if (tab.Right > Area.Right - 8) break;
-            if (i == _file) RetroDraw.Cursor(g, tab, tick);
-            RetroDraw.Text(g, name, tab.X + 5, tab.Y + 2, i == _file ? RetroDraw.Yellow : RetroDraw.System);
-            int index = i;
-            hot.Add(new VipHot(tab, () =>
-            {
-                _file = index;
-                _wrapWidth = 0;
-            }));
-            x = tab.Right + 4;
-        }
-
-        var body = new Rect(Area.X + 10, Area.Y + 28, Area.Width - 20, Area.Height - 50);
-        if (_wrapWidth != body.Width - 4) Load(body.Width - 4);
-        _visible = Math.Max(1, (int)(body.Height / LineHeight));
-        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - _visible));
-        using (g.PushClip(body))
-        {
-            for (int i = _top; i < Math.Min(_lines.Count, _top + _visible); i++)
-                RetroDraw.Text(g, _lines[i], body.X, body.Y + (i - _top) * LineHeight, RetroDraw.TextColor);
-        }
-        if (_top > 0) RetroDraw.MoreArrow(g, Area.Center.X, body.Y - 6, tick, down: false);
-        if (_top + _visible < _lines.Count) RetroDraw.MoreArrow(g, Area.Center.X, Area.Bottom - 20, tick);
-        RetroDraw.Text(g, "↑↓ スクロール 　←→ ファイル 　Esc 閉じる",
-            Area.X + 10, Area.Bottom - 18, RetroDraw.System);
-    }
-
-    public override void Scroll(int steps) => _top = Math.Clamp(_top + steps, 0, Math.Max(0, _lines.Count - _visible));
-
-    public override bool OnKey(Key key)
-    {
-        switch (key)
-        {
-            case Key.Up: Scroll(-1); break;
-            case Key.Down: Scroll(1); break;
-            case Key.PageUp: Scroll(-_visible); break;
-            case Key.PageDown or Key.Space: Scroll(_visible); break;
-            case Key.Home: _top = 0; break;
-            case Key.End: _top = int.MaxValue; Scroll(0); break;
-            case Key.Left:
-                _file = (_file + _files.Count - 1) % _files.Count;
-                _wrapWidth = 0;
-                break;
-            case Key.Right:
-                _file = (_file + 1) % _files.Count;
-                _wrapWidth = 0;
-                break;
-            case Key.Escape or Key.X or Key.Back or Key.Enter: return false;
-        }
-        return true;
-    }
-}
-
 /// <summary>VIPRPG mode's settings: how RPG Maker 2000/2003 games start, and the game folders.</summary>
 internal sealed class VipSettings : VipOverlay
 {
-    private sealed record Entry(string Label, Func<string> Value, string Hint, Action Run, bool Enabled = true);
+    private sealed record Entry(string Label, Func<string> Value, string Hint, Action Run, bool Enabled = true, string? Id = null);
 
     private readonly Rm2kOptions _options;
     private readonly VipData _data;
@@ -198,42 +57,63 @@ internal sealed class VipSettings : VipOverlay
         bool rpgRt = !_options.UseEasyRpg;
         var entries = new List<Entry>
         {
-            new("EasyRPGを使う", () => _options.UseEasyRpg ? "いつも" : _options.EasyRpgFallback ? "RPG_RT.exeがない時" : "使わない",
-                "EasyRPG Player (bundled): for every 2000/2003 game, only for games without RPG_RT.exe, or never.", () => Toggle(() =>
+            new(T("EasyRPGを使う", "Use EasyRPG"), () => _options.UseEasyRpg ? T("いつも", "Always")
+                    : _options.EasyRpgFallback ? T("RPG_RT.exeがない時", "When there's no RPG_RT.exe") : T("使わない", "Never"),
+                T("同梱のEasyRPG Playerを、すべての2000/2003作品に使うか、RPG_RT.exeのない作品だけに使うか、使わないか。",
+                    "EasyRPG Player (bundled): for every 2000/2003 game, only for games without RPG_RT.exe, or never."), () => Toggle(() =>
                 {
                     // いつも → RPG_RT.exeがない時 → 使わない → いつも
                     if (_options.UseEasyRpg) (_options.UseEasyRpg, _options.EasyRpgFallback) = (false, true);
                     else if (_options.EasyRpgFallback) _options.EasyRpgFallback = false;
                     else (_options.UseEasyRpg, _options.EasyRpgFallback) = (true, true);
                 })),
-            new("ウィンドウ表示", () => OnOff(_options.Window),
-                "Start in a window instead of full screen.", () => Toggle(() => _options.Window = !_options.Window)),
-            new("小さい画面で起動", () => OnOff(_options.SmallWindow),
-                "Switch RPG_RT to its small 320x240 window (presses F5 once it is up).", () => Toggle(() => _options.SmallWindow = !_options.SmallWindow), rpgRt),
-            new("CPUを1つだけ使う", () => OnOff(_options.SingleCpu),
-                "Keep RPG_RT on one CPU core: fixes games that run too fast or freeze.", () => Toggle(() => _options.SingleCpu = !_options.SingleCpu), rpgRt),
-            new("メモスト対策", () => OnOff(_options.MemoryStreamFix),
-                "Patch out RPG_RT's memory stream error while the game runs (Windows).", () => Toggle(() => _options.MemoryStreamFix = !_options.MemoryStreamFix), rpgRt && OperatingSystem.IsWindows()),
-            new("ランタイム", () => _options.RuntimeFolder ?? "自動 (MoshimoLoaderを探す)",
-                "Folder with 2000\\RPG_RT.exe and 2003\\RPG_RT.exe for games shipped without one. Del resets to automatic.",
-                () => _ = PickRuntimeAsync()),
-            new("EasyRPG Player", () => _options.EasyRpgPath ?? "同梱版 (EasyRPGフォルダ)",
-                "EasyRPG Player's program: the bundled one unless you choose another. A game's own Player.exe is used first. Del resets.",
-                () => _ = PickEasyRpgAsync())
+            new(T("ウィンドウ表示", "Windowed"), () => OnOff(_options.Window),
+                T("フルスクリーンではなくウィンドウで起動する。", "Start in a window instead of full screen."), () => Toggle(() => _options.Window = !_options.Window)),
+            new(T("小さい画面で起動", "Small Window"), () => OnOff(_options.SmallWindow),
+                T("RPG_RTを320x240の小さい画面にする（起動後にF5を押す）。", "Switch RPG_RT to its small 320x240 window (presses F5 once it is up)."), () => Toggle(() => _options.SmallWindow = !_options.SmallWindow), rpgRt),
+            new(T("CPUを1つだけ使う", "Use One CPU Core"), () => OnOff(_options.SingleCpu),
+                T("RPG_RTをCPU1つで動かす。速すぎたり固まったりする作品に効く。", "Keep RPG_RT on one CPU core: fixes games that run too fast or freeze."), () => Toggle(() => _options.SingleCpu = !_options.SingleCpu), rpgRt),
+            new(T("メモスト対策", "Memory Stream Fix"), () => OnOff(_options.MemoryStreamFix),
+                T("ゲーム中のRPG_RTのメモリーストリームエラーを防ぐ（Windows）。", "Patch out RPG_RT's memory stream error while the game runs (Windows)."), () => Toggle(() => _options.MemoryStreamFix = !_options.MemoryStreamFix), rpgRt && OperatingSystem.IsWindows()),
+            new(T("ランタイム", "Runtime"), () => _options.RuntimeFolder ?? T("自動 (MoshimoLoaderを探す)", "Automatic (finds MoshimoLoader)"),
+                T("RPG_RT.exeのない作品に使う、2000\\RPG_RT.exeと2003\\RPG_RT.exeの入ったフォルダ。Delで自動に戻す。",
+                    "Folder with 2000\\RPG_RT.exe and 2003\\RPG_RT.exe for games shipped without one. Del resets to automatic."),
+                () => _ = PickRuntimeAsync(), Id: "runtime"),
+            new("EasyRPG Player", () => _options.EasyRpgPath ?? T("同梱版 (EasyRPGフォルダ)", "Bundled (EasyRPG folder)"),
+                T("EasyRPG Playerのプログラム。選ばなければ同梱版。作品にPlayer.exeがあればそちらが先。Delで戻す。",
+                    "EasyRPG Player's program: the bundled one unless you choose another. A game's own Player.exe is used first. Del resets."),
+                () => _ = PickEasyRpgAsync(), Id: "easyrpg")
         };
-        entries.Add(new Entry("ダウンロード先", () => _data.DownloadFolder ?? "自動 (ランチャーのgamesフォルダ)",
-            "Where downloaded games are saved and unpacked. Del resets to the games folder beside the launcher.", () => _ = PickDownloadFolderAsync()));
+        entries.Add(new Entry(T("クリア済みの作品", "Completed Games"), () => _data.ShowCompleted ? T("表示する", "Show") : T("表示しない", "Hide"),
+            T("クリア済みにした作品を一覧に出すかどうか（作品を右クリック → クリア済みにする）。",
+                "Show or hide the games you've marked completed (right-click a game → Mark Completed)."), () =>
+            {
+                Toggle(() => _data.ShowCompleted = !_data.ShowCompleted);
+                _owner.RefreshList();
+            }));
+        entries.Add(new Entry(T("言語", "Language"), () => _data.English ? "English" : "日本語",
+            T("ランチャーの表示を日本語か英語に。作品名・作者・祭りの名前はそのまま。",
+                "Show the launcher in Japanese or English. Game titles, authors and festival names stay as they are."), () =>
+            {
+                Toggle(() => _data.English = !_data.English);
+                _owner.ApplyLanguage();
+            }));
+        entries.Add(new Entry(T("ダウンロード先", "Download Folder"), () => _data.DownloadFolder ?? T("自動 (ランチャーのgamesフォルダ)", "Automatic (the launcher's games folder)"),
+            T("ダウンロードした作品を保存・展開する場所。Delでランチャー横のgamesフォルダに戻す。",
+                "Where downloaded games are saved and unpacked. Del resets to the games folder beside the launcher."), () => _ = PickDownloadFolderAsync(), Id: "downloads"));
         foreach (string folder in _data.Directories.ToList())
         {
-            entries.Add(new Entry("フォルダ", () => folder, "Enter removes this folder from VIPRPG mode (nothing is deleted).", () =>
+            entries.Add(new Entry(T("フォルダ", "Folder"), () => folder,
+                T("Enterでこのフォルダを外す（ファイルは消えない）。", "Enter removes this folder from VIPRPG mode (nothing is deleted)."), () =>
             {
                 _data.Directories.Remove(folder);
                 _save();
                 _rescan();
             }));
         }
-        entries.Add(new Entry("モード", () => "VIPRPG", "Enter switches to HRPG mode (the DLsite library).", _switchMode));
-        entries.Add(new Entry("閉じる", () => "", "Close the settings.", _owner.CloseOverlay));
+        entries.Add(new Entry(T("モード", "Mode"), () => "VIPRPG",
+            T("EnterでHRPGモード（DLsiteのライブラリ）に切り替える。", "Enter switches to HRPG mode (the DLsite library)."), _switchMode));
+        entries.Add(new Entry(T("閉じる", "Close"), () => "", T("設定を閉じる。", "Close the settings."), _owner.CloseOverlay));
         return entries;
     }
 
@@ -245,7 +125,7 @@ internal sealed class VipSettings : VipOverlay
 
     private async Task PickRuntimeAsync()
     {
-        string? folder = await _owner.PickAsync(folder: true, "RPG_RT.exeの入ったランタイムフォルダ");
+        string? folder = await _owner.PickAsync(folder: true, T("RPG_RT.exeの入ったランタイムフォルダ", "Runtime Folder with RPG_RT.exe"));
         if (folder is null) return;
         _options.RuntimeFolder = folder;
         _save();
@@ -261,7 +141,7 @@ internal sealed class VipSettings : VipOverlay
 
     private async Task PickDownloadFolderAsync()
     {
-        string? folder = await _owner.PickAsync(folder: true, "ダウンロードしたゲームを置くフォルダ");
+        string? folder = await _owner.PickAsync(folder: true, T("ダウンロードしたゲームを置くフォルダ", "Folder for Downloaded Games"));
         if (folder is null) return;
         _data.DownloadFolder = folder;
         _save();
@@ -274,7 +154,7 @@ internal sealed class VipSettings : VipOverlay
         Area = Centered(size, Math.Min(size.Width - 40, 640), Math.Min(size.Height - 40, entries.Count * 16 + 60));
         RetroDraw.Fill(g, new Rect(size), Color.FromArgb(120, 0, 0, 0));
         RetroDraw.Window(g, Area);
-        RetroDraw.Text(g, "設定 ― ツクール2000/2003の起動", Area.X + 10, Area.Y + 6, RetroDraw.System);
+        RetroDraw.Text(g, T("設定 ― ツクール2000/2003の起動", "Settings — RPG Maker 2000/2003 Launch"), Area.X + 10, Area.Y + 6, RetroDraw.System);
 
         double labelWidth = 140;
         for (int i = 0; i < entries.Count; i++)
@@ -309,9 +189,9 @@ internal sealed class VipSettings : VipOverlay
                 if (entries[_index].Enabled) entries[_index].Run();
                 break;
             case Key.Delete:
-                if (entries[_index].Label == "ランタイム") _options.RuntimeFolder = null;
-                else if (entries[_index].Label == "EasyRPG Player") _options.EasyRpgPath = null;
-                else if (entries[_index].Label == "ダウンロード先") _data.DownloadFolder = null;
+                if (entries[_index].Id == "runtime") _options.RuntimeFolder = null;
+                else if (entries[_index].Id == "easyrpg") _options.EasyRpgPath = null;
+                else if (entries[_index].Id == "downloads") _data.DownloadFolder = null;
                 _save();
                 break;
             case Key.Escape or Key.X or Key.Back: return false;
@@ -354,7 +234,13 @@ internal sealed class VipMenu : VipOverlay
             var row = new Rect(Area.X + 6, Area.Y + 8 + i * 16, Area.Width - 12, 16);
             if (item.Run is null)
             {
-                RetroDraw.Text(g, item.Label, row.X + 4, row.Y + 2, RetroDraw.System);
+                // A heading splits the menu: centred, with a rule out to each edge.
+                double labelWidth = RetroDraw.Width(item.Label);
+                double labelX = Math.Floor(row.Center.X - labelWidth / 2), lineY = Math.Floor(row.Center.Y);
+                var rule = Color.FromArgb(170, 152, 184, 255);
+                RetroDraw.Fill(g, new Rect(row.X + 2, lineY, Math.Max(0, labelX - 6 - row.X - 2), 1), rule);
+                RetroDraw.Fill(g, new Rect(labelX + labelWidth + 6, lineY, Math.Max(0, row.Right - 2 - labelX - labelWidth - 6), 1), rule);
+                RetroDraw.Text(g, item.Label, labelX, row.Y + 2, RetroDraw.System);
                 continue;
             }
             if (i == _index) RetroDraw.Cursor(g, row, tick);

@@ -48,6 +48,9 @@ internal sealed class VipWork
     /// <summary>The download links the matsuri listed (itch.io, Google Drive, MEGA…), many of them dead by now.</summary>
     public List<string>? Downloads { get; set; }
 
+    /// <summary>Announced but never submitted (エターナル), as the matsuri's own page says: there's nothing to download.</summary>
+    public bool Eternal { get; set; }
+
     [JsonIgnore] public VipMatsuri? Event { get; set; }
 
     /// <summary>The copy on this PC, once matched.</summary>
