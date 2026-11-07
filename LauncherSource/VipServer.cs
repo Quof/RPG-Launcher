@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -105,6 +106,10 @@ internal static class VipServer
             ConnectTimeout = TimeSpan.FromSeconds(15),
             PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         };
+        // Development aid: RPGLAUNCHER_TEST_SOCKET_ERROR=<code> fails every connection with that Windows socket error
+        // (10013 blocked by this PC, 11001 no such host…), to check how failures are explained.
+        if (int.TryParse(Environment.GetEnvironmentVariable("RPGLAUNCHER_TEST_SOCKET_ERROR"), out int testError))
+            handler.ConnectCallback = (_, _) => ValueTask.FromException<Stream>(new SocketException(testError));
         var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
         return client;
@@ -353,7 +358,9 @@ internal static class VipServer
                             throw new IOException($"The connection closed at {received:N0} of {game.Size:N0} bytes.");
                         break;
                     }
-                    catch (Exception ex) when (attempt < 3 && !cancel.IsCancellationRequested && ex is IOException or HttpRequestException)
+                    // A connection this PC itself refuses (a VPN or firewall) fails the same way every time: no retries.
+                    catch (Exception ex) when (attempt < 3 && !cancel.IsCancellationRequested && ex is IOException or HttpRequestException &&
+                                               !BlockedByThisPc(ex))
                     {
                         Diagnostics.Log($"Download interrupted at {received:N0} bytes, resuming (try {attempt + 2}): {url}: {ex.Message}");
                         await Task.Delay(TimeSpan.FromSeconds(2 * (attempt + 1)), cancel);
@@ -378,6 +385,27 @@ internal static class VipServer
     }
 
     /// <summary>Explains a failed list fetch or download in a line, in Japanese and English.</summary>
+    /// <summary>The socket error under a failed request (10013 blocked, 11001 no such host…), if there is one.</summary>
+    private static SocketError? SocketCode(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e is SocketException socket) return socket.SocketErrorCode;
+        return null;
+    }
+
+    /// <summary>True when this PC itself refused the connection (Windows error 10013: a VPN's kill switch or
+    /// split tunnel, a firewall or security software), so no server was ever reached.</summary>
+    public static bool BlockedByThisPc(Exception ex) => ex is HttpRequestException && SocketCode(ex) is SocketError.AccessDenied;
+
+    /// <summary>The longer explanation for <see cref="BlockedByThisPc"/>, for a dialog.</summary>
+    public static (string Japanese, string English) BlockedDetails =>
+        ("このPCがランチャーの通信をブロックしたので、サーバーまで届いていません（Windowsのエラー10013）。\n\n" +
+         "よくある原因はVPNです。VPNが切れている間のキルスイッチや、RPG Launcher.exeを「VPNのみ」にするスプリットトンネルの設定で起こります。\n\n" +
+         "VPNにつなぐか、スプリットトンネルでRPG Launcher.exeをVPNの対象外（バイパス）にしてね。ファイアウォールやセキュリティソフトがこのアプリを止めている場合も同じになります。",
+         "This PC blocked the launcher's connection, so the server was never reached (Windows error 10013).\n\n" +
+         "A VPN usually does this: its kill switch while it's disconnected, or a split-tunnel rule that lets RPG Launcher.exe use the VPN only.\n\n" +
+         "Connect the VPN, or set RPG Launcher.exe to bypass it in the VPN's split tunneling. A firewall or security software blocking the app does the same.");
+
     public static (string Japanese, string English) Explain(Exception ex) => ex switch
     {
         VipLimitException { Daily: true } limit =>
@@ -393,6 +421,16 @@ internal static class VipServer
             ("サーバーにファイルがないみたい。", "The server doesn't have that file (404). The list may be newer than the files, or the address is wrong."),
         HttpRequestException { StatusCode: { } code } =>
             ("サーバーがエラーを返した…", $"The server answered {(int)code} {code}. It may be busy; try again later."),
+        HttpRequestException when SocketCode(ex) is SocketError.AccessDenied =>
+            ("このPCが通信をブロック中…VPNの設定を確認してね", "This PC blocked the connection: check your VPN or firewall"),
+        HttpRequestException when SocketCode(ex) is SocketError.HostNotFound or SocketError.TryAgain or SocketError.NoData =>
+            ("サーバーの住所が分からない…ネット接続を確認してね", "Couldn't look up the server: check the connection or VPN"),
+        HttpRequestException when SocketCode(ex) is SocketError.NetworkUnreachable or SocketError.NetworkDown or SocketError.HostUnreachable =>
+            ("ネットワークにつながっていないみたい", "No network connection: check Wi-Fi, the cable or the VPN"),
+        HttpRequestException when SocketCode(ex) is SocketError.TimedOut or SocketError.ConnectionRefused or SocketError.ConnectionReset =>
+            ("接続が切られた…少ししてからもう一度", "The connection was cut off: try again in a little while"),
+        HttpRequestException when ex.InnerException is System.Security.Authentication.AuthenticationException =>
+            ("安全な接続ができなかった…", "The secure connection failed: security software or the PC's clock?"),
         HttpRequestException =>
             ("サーバーにつながらない…", "Couldn't reach the download server: check the internet connection."),
         OperationCanceledException =>

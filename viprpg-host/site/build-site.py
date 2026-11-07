@@ -174,9 +174,9 @@ h1{font-size:30px;margin:6px 0 4px} h2{font-size:22px;margin:28px 0 10px;color:v
 .year{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
 .fest{display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--card);border:2px solid #34539f;border-radius:6px;color:var(--ink)}
 .fest:hover{border-color:var(--edge);text-decoration:none}
-.fest .banner{display:flex;align-items:center;justify-content:center;aspect-ratio:5/1;background:#050b26;border-radius:3px;overflow:hidden}
+.fest .banner{display:flex;align-items:center;justify-content:center;aspect-ratio:5/1;overflow:hidden}
 .fest .banner img{max-width:100%;max-height:100%;object-fit:contain;image-rendering:pixelated}
-.fest .banner.plate{font-family:"DotGothic16",monospace;color:#6f8fe0;font-size:15px;padding:0 8px;text-align:center;
+.fest .banner.plate{border-radius:3px;font-family:"DotGothic16",monospace;color:#6f8fe0;font-size:15px;padding:0 8px;text-align:center;
   background:repeating-linear-gradient(45deg,#08143d 0 6px,#0b1a4a 6px 12px);border:1px dashed #34539f}
 .banners{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 8px}
 .banners img{height:40px;width:auto;max-width:100%;image-rendering:pixelated;border-radius:2px}
@@ -200,8 +200,8 @@ input[type=search]{font:inherit;color:var(--ink);background:#081440;border:2px s
 input[type=search]:focus{outline:none;border-color:var(--accent)}
 table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #2c4aa0;vertical-align:top}
-th{font-family:"DotGothic16",monospace;font-weight:400;color:var(--accent);position:sticky;top:64px;background:#0f2257}
-td.t{overflow-wrap:anywhere} td.s{white-space:nowrap;color:var(--dim)} td.d{white-space:nowrap}
+th{font-family:"DotGothic16",monospace;font-weight:400;color:var(--accent);position:sticky;top:64px;background:#0f2257;white-space:nowrap}
+td.t{overflow-wrap:anywhere} td.a{width:24%;min-width:7em;overflow-wrap:anywhere} td.s{white-space:nowrap;color:var(--dim)} td.d{white-space:nowrap}
 tr:target td{background:rgba(255,216,74,.15)}
 .areas{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .area{padding:10px 12px;background:var(--card);border:2px solid #34539f;border-radius:6px;color:var(--ink)}
@@ -414,6 +414,8 @@ function filterWorks(q){{q=q.trim().toLowerCase();for(const el of document.query
     area_cards = {"保存库": [], "その他": []}
     for a in area_order:
         rows = sorted(areas[a], key=lambda g: g["path"])
+        # A page where no file has an author gets no author column (an empty one squeezes its heading to one letter a line).
+        has_author = any((g.get("author") or "").strip() for g in rows)
         section = rows[0].get("section") or "その他"
         label = rows[0].get("thread") or a
         if a.startswith("hokan"):
@@ -426,7 +428,8 @@ function filterWorks(q){{q=q.trim().toLowerCase();for(const el of document.query
             pic = pic_url(pkey, 1)
             t = esc(title) + (f' <a href="{esc(pic)}" class="muted" title="picture">▣</a>' if pic else "")
             dl = f'<a class="btn dl" href="{esc(dl_url(g["path"]))}" rel="nofollow">↓</a>' if downloads else ""
-            trs.append(f'<tr id="{anchor}"><td class="t">{t}</td><td class="hide-sm">{esc(g.get("author"))}</td>'
+            author_cell = f'<td class="a hide-sm">{esc(g.get("author"))}</td>' if has_author else ""
+            trs.append(f'<tr id="{anchor}"><td class="t">{t}</td>{author_cell}'
                        f'<td class="s">{size_text(g.get("size"))}</td><td class="d">{dl}</td></tr>')
             search.append([title, g.get("author") or "", label, f"s/{a}.html#{anchor}", 1])
         body = f"""<section class="window">
@@ -435,7 +438,7 @@ function filterWorks(q){{q=q.trim().toLowerCase();for(const el of document.query
   <div class="stats"><div class="stat"><b>{len(rows)}</b>{bi("ファイル", "files")}</div></div>
   <div class="toolbar"><input type="search" placeholder="この保管庫から探す / Filter" oninput="filterRows(this.value)"></div>
 </section>
-<table id="rows"><thead><tr><th>{bi("タイトル", "Title")}</th><th class="hide-sm">{bi("作者", "Author")}</th><th>{bi("サイズ", "Size")}</th><th></th></tr></thead>
+<table id="rows"><thead><tr><th>{bi("タイトル", "Title")}</th>{f'<th class="hide-sm">{bi("作者", "Author")}</th>' if has_author else ""}<th>{bi("サイズ", "Size")}</th><th></th></tr></thead>
 <tbody>
 {''.join(trs)}
 </tbody></table>

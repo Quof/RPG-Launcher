@@ -449,7 +449,8 @@ internal sealed class VipView : PixelCanvas
         catch (Exception ex)
         {
             Diagnostics.Log("VIPRPG server list not fetched: " + ex);
-            if (!quiet)
+            // A connection this PC blocks fails every download too, so it is said even on the quiet check at start.
+            if (!quiet || VipServer.BlockedByThisPc(ex))
             {
                 var (japanese, english) = VipServer.Explain(ex);
                 Say(japanese, english);
@@ -2086,6 +2087,7 @@ internal sealed class VipView : PixelCanvas
                 (japanese, english) = ("配布元から直接は取れなかった。「配布元」で開いてみてね。", ex.Message + " Try Source to open the page.");
             Say(japanese, english);
             if (ex is VipLimitException limit) await WarnLimitAsync(limit, japanese, english);
+            else if (VipServer.BlockedByThisPc(ex)) await ExplainBlockedAsync();
         }
         finally
         {
@@ -2094,6 +2096,17 @@ internal sealed class VipView : PixelCanvas
             _downloadCancel = null;
             Redraw();
         }
+    }
+
+    private bool _blockedExplained;
+
+    /// <summary>The first download this PC blocks in a session gets the full explanation in a dialog.</summary>
+    private async Task ExplainBlockedAsync()
+    {
+        if (_blockedExplained || TopLevel.GetTopLevel(this) is not Window window) return;
+        _blockedExplained = true;
+        var (japanese, english) = VipServer.BlockedDetails;
+        await MessageDialog.ShowAsync(window, T(japanese, english), T("接続がブロックされました", "Connection Blocked"), MessageButtons.Ok);
     }
 
     /// <summary>Downloads left today, from this many down, are mentioned after each download.</summary>
