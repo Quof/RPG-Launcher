@@ -28,13 +28,7 @@ HRPG mode is built around organizing DLsite games and checking new releases on t
 - **Names and pictures** — cards use the DLsite title and image, or the game's cleaned title and title screen. Right-click a card to rename it, change or reframe its picture, or choose title screen or DLsite image.
 - **New on DLsite** — games released in the last 30 days, with price, discount, rating and tags.
 - **Display** — four styles, rectangular or square cards, optional paging, English or Japanese metadata. On screens of 2560×1440 or more the window opens at 1920×1080.
-- **Cheats** — right-click an MV or MZ game → **Play with Cheats** to change gold, levels, EXP, HP, MP and stats while playing, heal the party, walk faster or walk through walls. **Advanced…** edits variables, switches and items, runs and replays events, opens the save and load screens anywhere, and has a script console. Other RPG Maker games get **Play in Test Mode**. See [Cheats](#cheats).
-
-| Key | Action |
-| --- | --- |
-| `F5` | Rescan (New on DLsite: refresh today) |
-| `Ctrl+F` / `Esc` | Search / clear search |
-| `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next page |
+- **Cheats** — right-click an MV or MZ game → **Play with Cheats** to change gold, levels, EXP, HP, MP and stats while playing, heal the party, walk faster or walk through walls. **Advanced…** edits variables, switches and items, runs and replays events, opens the save and load screens anywhere, and has a script console. Other RPG Maker games get **Play in Test Mode**. 
 
 ## Linux
 
