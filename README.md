@@ -14,8 +14,8 @@ HRPG mode is built around organizing DLsite games and checking new releases on t
 
 ## Quick start
 
-1. Download the launcher from the releases and put it in the holder with your games (or anywhere).
-2. Run it. The first time, it asks what you're using it for (DLsite HRPGs or VIPRPGs) and opens in that mode. It scans its folder up to three levels deep. You can add other folders by going to the options menu (the ... menu) and choosing "Add Directory."
+1. Download the launcher from the releases.
+2. Run it. The first time, it asks what you're using it for (DLsite HRPGs or VIPRPGs) and opens in that mode. You can then go to options and select folders of pre-existing games to add. It scans those folders up to three levels deep. VIPRPGs downloaded will go into the directory the executable is in.
 3. Click a game to play. Press `F5` to refresh the page after adding new games.
 
 ## Features
