@@ -288,12 +288,10 @@ internal static class VipServer
     public static async Task DownloadAsync(string server, VipServerGame game, string target, Action<long> progress,
         CancellationToken cancel, string? resolved = null)
     {
-        // An original link comes already resolved by VipOriginal; anything else only from the archive or the server.
-        string url = game.Original
-            ? resolved ?? throw new InvalidDataException("The original link wasn't resolved: " + game.Url)
-            : game.Url is { } direct
-            ? VipUploader.IsArchiveUrl(direct) ? direct : throw new InvalidDataException("Downloads only come from archive.org: " + direct)
-            : Url(server, game.Path) ?? throw new InvalidDataException("The server lists a game at an unusable path: " + game.Path);
+        // Every game comes from the download server, and only from it: never an original link, an uploader or archive.org.
+        if (game.Original || game.Url is not null)
+            throw new InvalidDataException("Games only download from the archive's server: " + (game.Url ?? game.Path));
+        string url = Url(server, game.Path) ?? throw new InvalidDataException("The server lists a game at an unusable path: " + game.Path);
         string part = target + ".part";
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!);
         try
@@ -419,6 +417,8 @@ internal static class VipServer
             ("サーバーが混んでいるみたい。しばらくしてからもう一度。", "The download server is unavailable right now (503), perhaps over its free daily allowance. Try again later."),
         HttpRequestException { StatusCode: HttpStatusCode.NotFound } =>
             ("サーバーにファイルがないみたい。", "The server doesn't have that file (404). The list may be newer than the files, or the address is wrong."),
+        HttpRequestException { StatusCode: HttpStatusCode.Forbidden } =>
+            ("配布元に拒否された…地域やアクセスの制限かも", "The site refused the download (403): it may block your region or automatic downloads."),
         HttpRequestException { StatusCode: { } code } =>
             ("サーバーがエラーを返した…", $"The server answered {(int)code} {code}. It may be busy; try again later."),
         HttpRequestException when SocketCode(ex) is SocketError.AccessDenied =>

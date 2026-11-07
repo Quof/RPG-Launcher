@@ -145,7 +145,6 @@ internal sealed class VipView : PixelCanvas
     // Server games downloaded but still zipped inside their folder, by server path: the zip.
     private Dictionary<string, string> _remoteZip = new(StringComparer.OrdinalIgnoreCase);
     private bool _serverLoading;
-    private List<VipServerGame> _archiveGames = new();
     private VipManifest? _serverManifest;
     private VipServerGame? _downloading;
     private long _downloaded;
@@ -267,10 +266,8 @@ internal sealed class VipView : PixelCanvas
         _loadingCache = true;
         try
         {
-            // The uploader archive's games (built into the launcher), then the download server's list: the newer of the
-            // copy saved from the server and the one built into the launcher, so the lists show even offline or
-            // before the server has ever answered.
-            _archiveGames = await Task.Run(() => VipUploader.Load(_catalog).ToGames(_catalog));
+            // The download server's list: the newer of the copy saved from the server and the one built into the
+            // launcher, so the lists show even offline or before the server has ever answered.
             var saved = await Task.Run(() => VipServer.LoadCached(_serverCachePath));
             var builtIn = await Task.Run(VipServer.LoadBuiltIn);
             var manifest = saved is not null && VipServer.Replaces(saved, builtIn) ? saved : builtIn ?? saved;
@@ -377,26 +374,13 @@ internal sealed class VipView : PixelCanvas
         var known = new HashSet<string>(_catalog.Games.Select(w => VipServer.WorkKey(w.Matsuri, w.No, w.Title)).OfType<string>(),
             StringComparer.OrdinalIgnoreCase);
         var extras = new List<VipServerGame>();
-        // The server's own copies of the uploaders' unique games (its その他 section) stand in for the uploader
-        // archive's list: every game that list has is either there or a copy of a matsuri or 保管庫 game.
-        bool hostedOthers = _serverManifest?.Games.Any(g => g.Section == OtherSection) == true;
-        foreach (var game in (_serverManifest?.Games ?? new List<VipServerGame>()).Concat(_archiveGames))
+        // Only the download server's own games: a work it doesn't have shows as not downloadable (配布元 still opens
+        // its page in the browser). The uploader archive, live uploaders and works' original links are never used.
+        foreach (var game in _serverManifest?.Games ?? new List<VipServerGame>())
         {
+            if (game.Url is not null || game.Original) continue;
             if (game.WorkKey is { } key && known.Contains(key)) byWork.TryAdd(key, game);
-            else if (!(hostedOthers && game.Source == "uploader")) extras.Add(game);
-        }
-        // Works neither the archive nor the server has, but whose matsuri link is still one the launcher can fetch.
-        foreach (var work in _catalog.Games)
-        {
-            if (VipServer.WorkKey(work.Matsuri, work.No, work.Title) is not { } key ||
-                work.Downloads?.FirstOrDefault(VipOriginal.CanFetch) is not { } link) continue;
-            // The work's own link beats a file the archive couldn't keep, which may have been deleted since.
-            if (byWork.TryGetValue(key, out var existing) && existing.Source != "live") continue;
-            byWork[key] = new VipServerGame
-            {
-                Source = "original", Url = link, Matsuri = work.Matsuri, No = work.No, Title = work.Title, Author = work.Author,
-                Year = work.Event?.Year, Engine = work.Engine, Path = $"original/{work.Matsuri}/{work.No}"
-            };
+            else extras.Add(game);
         }
         _remoteByWork = byWork;
         // An uploader with only a stray file or two is patches and leftovers, not a collection: left out everywhere.

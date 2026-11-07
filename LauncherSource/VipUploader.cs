@@ -18,6 +18,12 @@ internal sealed class VipUpload
     /// <summary>False when the archive holds no copy (antivirus exclusions, password-protected uploads).</summary>
     public bool Hosted { get; init; }
 
+    /// <summary>
+    /// A password-protected upload whose password only the matsuri's organisers had (the uploader check of
+    /// 2026-11-05): never offered as a live download, which could only fail.
+    /// </summary>
+    public bool Locked { get; init; }
+
     public string Url => $"https://archive.org/download/{VipUploader.Item}/{Area.Id}/{Id:D6}.{Extension}";
 
     /// <summary>True for archives and programs (a game), false for pictures, text, and saves, music or maps by their name.</summary>
@@ -95,7 +101,7 @@ internal sealed class VipUploader
                     Label = areaElement.TryGetProperty("label", out var label) ? label.GetString() ?? "" : "",
                     Title = areaElement.TryGetProperty("title", out var title) ? title.GetString() ?? "" : ""
                 };
-                // Files are [id, name, ext, size, md5, comment, hosted].
+                // Files are [id, name, ext, size, md5, comment, hosted] and, for password-protected uploads, a final 1 (locked).
                 foreach (var file in areaElement.GetProperty("files").EnumerateArray())
                 {
                     area.Files.Add(new VipUpload
@@ -109,7 +115,8 @@ internal sealed class VipUploader
                         Size = file[3].ValueKind == JsonValueKind.Number ? file[3].GetInt64() : 0,
                         Md5 = file[4].ValueKind == JsonValueKind.String ? file[4].GetString() : null,
                         Comment = file[5].ValueKind == JsonValueKind.String ? file[5].GetString() : null,
-                        Hosted = file[6].GetInt32() == 1
+                        Hosted = file[6].GetInt32() == 1,
+                        Locked = file.GetArrayLength() > 7 && file[7].ValueKind == JsonValueKind.Number && file[7].GetInt32() == 1
                     });
                 }
                 area.Matsuri = MatsuriFor(area, catalog);
@@ -270,6 +277,8 @@ internal sealed class VipUploader
         {
             if (string.IsNullOrWhiteSpace(work.No) || matched.Contains(work) || FindFor(work, hosted: false, taken: used) is not { } file ||
                 !used.Add(file)) continue;
+            // A password only the organisers had: the download could only fail (配布元 still opens the page).
+            if (file.Locked) continue;
             games.Add(Live(file, work));
         }
         // The thread and wiki storage uploaders' other games. A matsuri uploader's unclaimed files are left out: they

@@ -109,7 +109,8 @@ def page(title, body, depth=0, description="", extra_head="", root=None):
 <meta name="description" content="{esc(description or 'VIPRPGの祭り作品と保管庫のアーカイブ。')}">
 {FONTS}
 <link rel="stylesheet" href="{up}style.css">
-<link rel="icon" href="{up}favicon.svg" type="image/svg+xml">
+<link rel="icon" href="{up}favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="{up}apple-touch-icon.png">
 {extra_head}
 <script>try{{var l=localStorage.getItem("lang");if(l)document.documentElement.dataset.lang=l;}}catch(e){{}}</script>
 </head>
@@ -221,12 +222,6 @@ tr:target td{background:rgba(255,216,74,.15)}
 }
 @media (max-width:380px){.works{grid-template-columns:1fr}}
 """
-
-FAVICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
-<rect width="16" height="16" rx="2" fill="#13235e"/><rect x="2" y="2" width="12" height="12" fill="none" stroke="#c9d8ff"/>
-<rect x="5" y="5" width="2" height="6" fill="#ffd84a"/><rect x="9" y="5" width="2" height="6" fill="#ffd84a"/><rect x="7" y="9" width="2" height="2" fill="#ffd84a"/>
-</svg>"""
-
 
 CONTACT = "dekirutranslations@gmail.com"
 
@@ -517,8 +512,9 @@ q.addEventListener('input',run);load();
         f.write("User-agent: *\nDisallow: /img/\n")
     with open(os.path.join(out, "style.css"), "w", encoding="utf-8") as f:
         f.write(CSS)
-    with open(os.path.join(out, "favicon.svg"), "w", encoding="utf-8") as f:
-        f.write(FAVICON)
+    # The launcher's character as the site's icon (made by LauncherSource/make-icons.py).
+    for icon in ("favicon.ico", "apple-touch-icon.png"):
+        shutil.copyfile(os.path.join(HERE, icon), os.path.join(out, icon))
 
     # The launcher's list, without the withheld games (the manifest already leaves them out).
     shutil.copyfile(manifest_path, os.path.join(out, "manifest.json"))
