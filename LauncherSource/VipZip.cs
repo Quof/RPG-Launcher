@@ -9,6 +9,49 @@ internal static class VipZip
     static VipZip() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
     /// <summary>
+    /// After a zip is unpacked: when its folder holds no game but holds zips (a game zipped again inside the upload,
+    /// with a readme beside it), unpacks those as well, each beside itself, and deletes each one that unpacked.
+    /// Two levels at most. Returns how many were unpacked.
+    /// </summary>
+    public static int ExtractInner(string folder)
+    {
+        int unpacked = 0;
+        for (int level = 0; level < 2; level++)
+        {
+            if (!Directory.Exists(folder) || GameScanner.Scan(folder).Count > 0) break;
+            List<string> inner;
+            try
+            {
+                inner = Directory.EnumerateFiles(folder, "*.zip", new EnumerationOptions
+                {
+                    RecurseSubdirectories = true, MaxRecursionDepth = 2, IgnoreInaccessible = true, MatchCasing = MatchCasing.CaseInsensitive
+                }).ToList();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                break;
+            }
+            int before = unpacked;
+            foreach (string zip in inner)
+            {
+                try
+                {
+                    Extract(zip);
+                    File.Delete(zip);
+                    unpacked++;
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or NotSupportedException)
+                {
+                    // A password or a broken zip: it stays, for the player to open.
+                    Diagnostics.Log($"Inner zip not extracted {zip}: {ex.Message}");
+                }
+            }
+            if (unpacked == before) break;
+        }
+        return unpacked;
+    }
+
+    /// <summary>
     /// Extracts the zip next to itself: a zip holding one folder becomes that folder, anything else goes into a
     /// folder named after the zip. Never merges into an existing folder. Returns the game's folder.
     /// </summary>
@@ -55,23 +98,29 @@ internal static class VipZip
 
     /// <summary>
     /// The encoding of a zip's unflagged names: UTF-8 when every one of them is valid UTF-8 (newer zippers, such as
-    /// itch.io uploads made on a Mac or with 7-Zip), else Shift-JIS, as old Japanese zips use without saying so.
+    /// itch.io uploads made on a Mac or with 7-Zip), else Shift-JIS, as old Japanese zips use without saying so, or the
+    /// DOS Western code page when the names make sense only that way (a zip made on a Western PC).
     /// </summary>
     private static Encoding NameEncoding(string zip)
     {
         var strict = new UTF8Encoding(false, throwOnInvalidBytes: true);
         // Latin-1 keeps each byte of a name as one character, so the raw bytes can be had back.
         using var raw = ZipFile.Open(zip, ZipArchiveMode.Read, Encoding.Latin1);
-        bool anyNonAscii = false;
+        var names = new List<byte>();
+        bool utf8 = true;
         foreach (var entry in raw.Entries)
         {
             byte[] bytes = Encoding.Latin1.GetBytes(entry.FullName);
             if (bytes.All(b => b < 0x80)) continue;
-            anyNonAscii = true;
+            names.AddRange(bytes);
+            names.Add((byte)'/');
             try { strict.GetString(bytes); }
-            catch (DecoderFallbackException) { return Encoding.GetEncoding(932); }
+            catch (DecoderFallbackException) { utf8 = false; }
         }
-        return anyNonAscii ? Encoding.UTF8 : Encoding.GetEncoding(932);
+        if (names.Count == 0) return Encoding.GetEncoding(932);
+        if (utf8) return Encoding.UTF8;
+        // Japanese Windows zips names in Shift-JIS; Western Windows in its DOS code page (437), where "ó" is one byte.
+        return TextFiles.Guess(names.ToArray(), Encoding.GetEncoding(437));
     }
 
     private static string Unique(string path)

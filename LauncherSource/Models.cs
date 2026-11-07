@@ -353,7 +353,7 @@ internal sealed class LauncherData
     public string? WineCommand { get; set; }
 
     /// <summary>The HRPG library or the VIPRPG archive (⋯ → Mode).</summary>
-    public LauncherMode Mode { get; set; } = LauncherMode.Hrpg;
+    public LauncherMode Mode { get; set; } = LauncherMode.Vip;
 
     /// <summary>How RPG Maker 2000/2003 games are started, in both modes.</summary>
     public Rm2kOptions Rm2k { get; set; } = new();
@@ -438,6 +438,10 @@ internal sealed class VipData
     public string OwnedSort { get; set; } = "sort:title";
     public string OwnedFilter { get; set; } = "show:all";
 
+    /// <summary>全作品's order and filter, with the same choices as 手持ち's but over every game.</summary>
+    public string AllSort { get; set; } = "sort:title";
+    public string AllFilter { get; set; } = "show:all";
+
     /// <summary>Matsuri ("matsuri:2025-kouhaku") and authors ("author:たんち") kept at the top of their lists, in pin order.</summary>
     public List<string> Pinned { get; set; } = new();
 
@@ -447,14 +451,29 @@ internal sealed class VipData
     /// <summary>Games marked completed (クリア済み), by the same keys as favorites.</summary>
     public List<string> Completed { get; set; } = new();
 
+    /// <summary>Games hidden from every list but 絞り込み → 非表示の作品, by the same keys as favorites.</summary>
+    public List<string> Hidden { get; set; } = new();
+
     /// <summary>False hides completed games from every list (設定 → クリア済みの作品).</summary>
     public bool ShowCompleted { get; set; } = true;
+
+    /// <summary>WOLF RPG Editor games' own screenshot key (ScreenShotFlag in Game.ini); off unless turned on in 設定.</summary>
+    public bool WolfScreenshotKey { get; set; }
 
     /// <summary>True shows the launcher's own words in English (設定 → 言語); game data is never translated.</summary>
     public bool English { get; set; }
 
+    /// <summary>
+    /// Right-clicking a list line beside its words opens that line's menu, as on the words; false (the default)
+    /// goes back a page instead (設定 → 空いた所を右クリック).
+    /// </summary>
+    public bool RightClickBlankOpensMenu { get; set; }
+
     /// <summary>Playlists: named lists of games in the user's order, shareable as a code.</summary>
     public List<VipPlaylist> Playlists { get; set; } = new();
+
+    /// <summary>The built-in playlists (VipDefaults) already added once, so one the user deletes doesn't come back.</summary>
+    public List<string> SeededPlaylists { get; set; } = new();
 
     /// <summary>The user's groups, in the order they were made.</summary>
     public List<string> Groups { get; set; } = new();
@@ -476,7 +495,13 @@ internal enum VipListMode
     Playlist,
 
     /// <summary>保管庫: the thread and wiki storage uploaders' games, and games only on this PC.</summary>
-    Storage
+    Storage,
+
+    /// <summary>WOLF RPG: the WOLF RPG Editor contests' entries, contest by contest.</summary>
+    Wolf,
+
+    /// <summary>シリーズ別: series of works, each in release order (Assets/vip-series.json). Last, so saved settings keep their meaning.</summary>
+    Series
 }
 
 /// <summary>A playlist: its name and its games, by the same keys as favorites ("2010-kouhaku/091", "dl:…").</summary>
@@ -484,6 +509,9 @@ internal sealed class VipPlaylist
 {
     public string Name { get; set; } = "";
     public List<string> Games { get; set; } = new();
+
+    /// <summary>The built-in playlist this one started as (VipDefaults), or null for the user's own.</summary>
+    public string? Builtin { get; set; }
 }
 
 internal sealed class VipRecord

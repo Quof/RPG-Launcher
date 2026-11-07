@@ -79,7 +79,7 @@ internal static class GameScanner
     {
         entry = (CreateMvMz(dir, scanRoot) ?? CreateRgss(dir, scanRoot) ?? CreateRm2k(dir, scanRoot) ??
                  CreateWolf(dir, scanRoot) ?? CreateRenPy(dir, scanRoot) ?? CreateUnity(dir, scanRoot) ??
-                 CreateTyrano(dir, scanRoot))!;
+                 CreateTyrano(dir, scanRoot) ?? CreateNwApp(dir, scanRoot))!;
         return entry is not null;
     }
 
@@ -323,8 +323,8 @@ internal static class GameScanner
     }
 
     /// <summary>
-    /// Wolf RPG Editor: Game.exe with its data in Data.wolf, Data\*.wolf or Data\BasicData,
-    /// and its MIDI library GuruguruSMF4.dll. The title is packed away, so the folder names it.
+    /// Wolf RPG Editor: Game.exe (or the exe it was renamed to) with its data in Data.wolf, Data\*.wolf or
+    /// Data\BasicData, and its MIDI library GuruguruSMF4.dll. The title is packed away, so the folder names it.
     /// </summary>
     private static GameEntry? CreateWolf(string dir, string scanRoot)
     {
@@ -343,7 +343,7 @@ internal static class GameScanner
         if (!wolf) return null;
 
         string? exe = new[] { "Game.exe", "GamePro.exe" }.Select(name => Paths.File(Path.Combine(dir, name)))
-            .FirstOrDefault(path => path is not null);
+            .FirstOrDefault(path => path is not null) ?? RenamedWolfExe(dir);
         if (exe is null) return null;
 
         return new GameEntry
@@ -356,6 +356,30 @@ internal static class GameScanner
             Engine = "Wolf RPG Editor",
             FolderCreatedUtc = FolderCreatedUtc(dir)
         };
+    }
+
+    // The Wolf RPG Editor's own tools and installers, never the game.
+    private static readonly Regex NotWolfGameExe = new(
+        @"^(config|editor|wolfeditor|unins\d*|uninstall|setup|install|dxsetup|dxwebsetup|vcredist.*|updater?|patch|.*launcher.*|コンフィグ.*|設定.*)\.exe$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// A Wolf RPG Editor game whose author renamed Game.exe (to the title, ゲーム開始.exe and so on): the folder's
+    /// biggest exe that isn't Config.exe or another tool. The engine is megabytes; Config.exe is far smaller.
+    /// </summary>
+    private static string? RenamedWolfExe(string dir)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(dir, "*.exe", Paths.AnyCase)
+                .Where(path => !NotWolfGameExe.IsMatch(Path.GetFileName(path)))
+                .OrderByDescending(path => new FileInfo(path).Length)
+                .FirstOrDefault();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static readonly string[] AnyPictureExtensions = { ".png", ".jpg", ".jpeg", ".webp", ".bmp" };
@@ -561,6 +585,42 @@ internal static class GameScanner
             Title = FirstNonEmpty(title, Path.GetFileName(dir))!,
             Engine = "TyranoScript",
             Title1Path = TyranoTitlePicture(files),
+            FolderCreatedUtc = FolderCreatedUtc(dir)
+        };
+    }
+
+    /// <summary>
+    /// Any other NW.js game: an exe beside NW.js's own files and a package.json whose start page is in the folder,
+    /// such as an HTML game on RPG Maker MV's or MZ's player (made from MV's exe files) with no RPG Maker data.
+    /// Checked last, after the engines that also run on NW.js. It has no data folder, so nothing MV-only applies to it.
+    /// </summary>
+    private static GameEntry? CreateNwApp(string dir, string scanRoot)
+    {
+        if (Paths.File(Path.Combine(dir, "nw.dll")) is null && Paths.File(Path.Combine(dir, "nw.pak")) is null) return null;
+        if (Paths.File(Path.Combine(dir, "package.json")) is not { } package) return null;
+        string? main = null, name = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(package));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (doc.RootElement.TryGetProperty("main", out var value) && value.ValueKind == JsonValueKind.String) main = value.GetString();
+            if (doc.RootElement.TryGetProperty("name", out var named) && named.ValueKind == JsonValueKind.String) name = named.GetString();
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+        // The start page must be a file in the folder ("www/index.html"), not a URL or a page packed into the exe.
+        if (string.IsNullOrWhiteSpace(main) || main.Contains("..", StringComparison.Ordinal) || main.Contains(':', StringComparison.Ordinal)) return null;
+        if (Paths.File(Path.Combine(dir, main.Replace('/', Path.DirectorySeparatorChar))) is null) return null;
+        if ((FindExecutable(dir) ?? AppExecutable(dir)) is not { } exe) return null;
+        return new GameEntry
+        {
+            Key = KeyFor(dir, scanRoot),
+            RootPath = dir,
+            ExecutablePath = exe,
+            Title = FirstNonEmpty(ReadPackageTitle(dir), name, Path.GetFileName(dir))!,
+            Engine = "NW.js",
             FolderCreatedUtc = FolderCreatedUtc(dir)
         };
     }

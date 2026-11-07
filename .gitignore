@@ -23,3 +23,9 @@ launcher-images/
 launcher-dlsite/
 vip-sozai/
 games/
+
+# The index website, built by viprpg-host/deploy-site.ps1
+viprpg-host/site-out/
+
+# Claude Code's local settings and preview servers (machine-specific paths)
+.claude/

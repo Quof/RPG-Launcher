@@ -1,0 +1,28 @@
+# The download Worker in front of the private viprpg bucket. Deploy it on the free Workers plan:
+# past the free daily request limit Cloudflare refuses requests instead of billing.
+name = "viprpg-downloads"
+main = "src/worker.js"
+compatibility_date = "2025-06-01"
+
+# Off: the Worker answers only on its own domain, so the domain's firewall rule can't be bypassed.
+workers_dev = false
+routes = [{ pattern = "dl.viprpg-archive.com", custom_domain = true }]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "viprpg"
+
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "IpLimiter"
+
+# SQLite-backed Durable Objects are the kind the free plan allows.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IpLimiter"]
+
+[vars]
+DAILY_DOWNLOADS = "500"
+BURST_REQUESTS = "30"
+BURST_SECONDS = "10"
+BLOCK_MINUTES = "10"

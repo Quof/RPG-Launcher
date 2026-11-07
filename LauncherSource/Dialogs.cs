@@ -55,11 +55,15 @@ internal enum MessageButtons
 /// <summary>The launcher's message box.</summary>
 internal static class MessageDialog
 {
-    /// <summary>Shows a message; true for OK or Yes. <paramref name="defaultNo"/> makes Enter pick Cancel or No.</summary>
+    /// <summary>
+    /// Shows a message; true for OK or Yes. <paramref name="defaultNo"/> makes Enter pick Cancel or No.
+    /// <paramref name="avoid"/> is the cursor's screen position: the dialog opens clear of it, so a double-click on
+    /// whatever opened it can't land on Yes.
+    /// </summary>
     public static async Task<bool> ShowAsync(Window? owner, string text, string caption,
-        MessageButtons buttons = MessageButtons.Ok, bool defaultNo = false)
+        MessageButtons buttons = MessageButtons.Ok, bool defaultNo = false, PixelPoint? avoid = null)
     {
-        var dialog = new MessageWindow(text, caption, buttons, defaultNo);
+        var dialog = new MessageWindow(text, caption, buttons, defaultNo) { Avoid = avoid };
         if (owner is { IsVisible: true }) return await dialog.ShowDialog<bool>(owner);
 
         dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -123,6 +127,37 @@ internal static class MessageDialog
             };
         }
 
+        /// <summary>A screen point (the cursor) the dialog must not open over.</summary>
+        public PixelPoint? Avoid { get; init; }
+
+        // How far the dialog stays from the cursor, in device-independent pixels.
+        private const double AvoidMargin = 80;
+
+        protected override void OnOpened(EventArgs e)
+        {
+            base.OnOpened(e);
+            if (Avoid is not { } cursor) return;
+            double scale = RenderScaling;
+            int margin = (int)Math.Ceiling(AvoidMargin * scale);
+            var size = new PixelSize((int)Math.Ceiling(Width * scale), (int)Math.Ceiling(Height * scale));
+            // The frame adds a little around the client area; the margin covers it.
+            var area = new PixelRect(Position.X - margin, Position.Y - margin, size.Width + margin * 2, size.Height + margin * 2);
+            if (!area.Contains(cursor)) return;
+
+            var work = (Screens.ScreenFromPoint(cursor) ?? Screens.Primary)?.WorkingArea
+                       ?? new PixelRect(0, 0, int.MaxValue / 2, int.MaxValue / 2);
+            int below = cursor.Y + margin, above = cursor.Y - margin - size.Height;
+            int y = below + size.Height <= work.Bottom ? below : above >= work.Y ? above : Position.Y;
+            int x = Position.X;
+            if (y == Position.Y)
+            {
+                // No room above or below: move it beside the cursor instead.
+                int right = cursor.X + margin, left = cursor.X - margin - size.Width;
+                x = right + size.Width <= work.Right ? right : Math.Max(work.X, left);
+            }
+            Position = new PixelPoint(Math.Clamp(x, work.X, Math.Max(work.X, work.Right - size.Width)), y);
+        }
+
         private void Finish(bool result)
         {
             Result = result;
@@ -146,8 +181,8 @@ internal sealed class FirstModeDialog : DialogWindow
     private const double ButtonHeight = 40;
     private const double Gap = 10;
 
-    /// <summary>The answer; HRPG unless VIPRPGs was chosen (closing the window keeps HRPG).</summary>
-    public LauncherMode Mode { get; private set; } = LauncherMode.Hrpg;
+    /// <summary>The answer; VIPRPG unless DLsite HRPGs was chosen (closing the window keeps VIPRPG).</summary>
+    public LauncherMode Mode { get; private set; } = LauncherMode.Vip;
 
     public FirstModeDialog()
     {
@@ -155,22 +190,22 @@ internal sealed class FirstModeDialog : DialogWindow
         var question = Ui.Label("What are you using this for?", Look.Font(12, bold: true), Look.Text);
         var note = Ui.Paragraph("何に使いますか？ You can switch modes later.",
             Look.Font(9), Look.TextDim);
-        var hrpg = new PillButton { Text = "DLsite HRPGs", Checked = true };
-        var vip = new PillButton { Text = "VIPRPGs" };
+        var vip = new PillButton { Text = "VIPRPGs", Checked = true };
+        var hrpg = new PillButton { Text = "DLsite HRPGs" };
         hrpg.Click += (_, _) => Choose(LauncherMode.Hrpg);
         vip.Click += (_, _) => Choose(LauncherMode.Vip);
         Body.Children.Add(question);
         Body.Children.Add(note);
-        Body.Children.Add(hrpg);
         Body.Children.Add(vip);
+        Body.Children.Add(hrpg);
         SetClientSize(Pad * 2 + ButtonWidth * 2 + Gap + 40, Pad + 28 + 24 + 14 + ButtonHeight + Pad);
         Body.Layout = size =>
         {
             Body.Place(question, Pad, Pad, size.Width - Pad * 2, 24);
             Body.Place(note, Pad, Pad + 30, size.Width - Pad * 2, 22);
             double left = (size.Width - ButtonWidth * 2 - Gap) / 2, top = size.Height - Pad - ButtonHeight;
-            Body.Place(hrpg, left, top, ButtonWidth, ButtonHeight);
-            Body.Place(vip, left + ButtonWidth + Gap, top, ButtonWidth, ButtonHeight);
+            Body.Place(vip, left, top, ButtonWidth, ButtonHeight);
+            Body.Place(hrpg, left + ButtonWidth + Gap, top, ButtonWidth, ButtonHeight);
         };
     }
 

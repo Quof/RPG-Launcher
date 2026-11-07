@@ -23,13 +23,19 @@ param(
     [string]$Bucket = (Join-Path $PSScriptRoot 'bucket'),
     [string]$Csv = (Join-Path $PSScriptRoot 'games.csv'),
     # The launcher's vip-catalog.json: checks matsuri ids and numbers, and fills in their titles.
-    [string]$Catalog = ''
+    [string]$Catalog = '',
+    # Where the launcher's built-in copy of the list goes ('' to skip).
+    [string]$BuiltIn = (Join-Path $PSScriptRoot '..\LauncherSource\Assets\vip-server.json.gz'),
+    # Folders kept in the bucket for preservation but left out of the manifest (the download Worker refuses them too):
+    # the WOLF RPG Editor contest games. Their games.csv rows are kept.
+    [string[]]$Withheld = @('games/wolf/')
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 
-$Columns = 'path', 'title', 'author', 'thread', 'year', 'engine', 'matsuri', 'no', 'note'
+# area and section group thread games in the launcher's 保管庫 list: one entry per area, under its section's heading.
+$Columns = 'path', 'title', 'author', 'thread', 'year', 'engine', 'matsuri', 'no', 'note', 'area', 'section'
 
 if ($PSVersionTable.PSEdition -eq 'Core') {
     [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance)
@@ -55,8 +61,12 @@ function Get-TitleGuess([string]$zipPath) {
         $ini = $zip.Entries | Where-Object { $_.Name -ieq 'RPG_RT.ini' } |
             Sort-Object { ($_.FullName -split '/').Count } | Select-Object -First 1
         if ($ini -and $ini.Length -lt 64KB) {
-            $reader = New-Object IO.StreamReader($ini.Open(), $ShiftJis)
-            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            # A damaged entry only costs the guess; the folder name below can still give one.
+            $text = $null
+            try {
+                $reader = New-Object IO.StreamReader($ini.Open(), $ShiftJis)
+                try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            } catch { $text = $null }
             if ($text -match '(?im)^\s*GameTitle\s*=\s*(.+?)\s*$') { return $Matches[1] }
         }
         $tops = @($zip.Entries | ForEach-Object { ($_.FullName -split '/')[0] } | Where-Object { $_ } | Select-Object -Unique)
@@ -131,7 +141,7 @@ foreach ($file in $zips) {
     } else {
         $matsuri = $null; $no = $null
         if (-not $row) {
-            $row = [pscustomobject]([ordered]@{ path = $path; title = $guess; author = ''; thread = ''; year = ''; engine = ''; matsuri = ''; no = ''; note = '' })
+            $row = [pscustomobject]([ordered]@{ path = $path; title = $guess; author = ''; thread = ''; year = ''; engine = ''; matsuri = ''; no = ''; note = ''; area = ''; section = '' })
             $rows[$path] = $row
             $added++
         }
@@ -156,7 +166,7 @@ foreach ($file in $zips) {
         $entry.source = 'thread'
     }
 
-    foreach ($col in 'title', 'author', 'thread', 'year', 'engine', 'note') {
+    foreach ($col in 'title', 'author', 'thread', 'year', 'engine', 'note', 'area', 'section') {
         $value = $null
         if ($row -and $row.$col) { $value = $row.$col.Trim() }
         elseif ($work -and $col -in 'title', 'author', 'engine' -and $work.$col) { $value = $work.$col }
@@ -167,6 +177,8 @@ foreach ($file in $zips) {
         }
     }
     if (-not $entry.title) { $warnings.Add("No title: $path") }
+    # A replacement character means the title was decoded with the wrong code page when it was staged.
+    elseif ($entry.title.Contains([char]0xFFFD)) { $warnings.Add("Garbled title (fix it in games.csv): $path") }
     $games.Add($entry)
 }
 Write-Progress -Activity 'Listing games' -Completed
@@ -176,14 +188,37 @@ foreach ($p in @($rows.Keys)) {
 }
 
 # --- write ---
+$withheldCount = 0
+if ($Withheld) {
+    $kept = New-Object Collections.Generic.List[object]
+    foreach ($g in $games) {
+        $p = [string]$g.path
+        if (@($Withheld | Where-Object { $p.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count) { $withheldCount++ }
+        else { $kept.Add($g) }
+    }
+    $games = $kept
+}
 $manifest = [ordered]@{
     version   = 1
     generated = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     count     = $games.Count
     games     = $games
 }
-[IO.File]::WriteAllText((Join-Path $Bucket 'manifest.json'), (ConvertTo-Json $manifest -Depth 5 -Compress), $Utf8NoBom)
+$manifestJson = ConvertTo-Json $manifest -Depth 5 -Compress
+[IO.File]::WriteAllText((Join-Path $Bucket 'manifest.json'), $manifestJson, $Utf8NoBom)
 [IO.File]::WriteAllText($cachePath, (ConvertTo-Json $newCache -Depth 3 -Compress), $Utf8NoBom)
+
+# The same list, gzipped, built into the launcher: its lists show even before the server answers.
+if ($BuiltIn) {
+    $bytes = $Utf8NoBom.GetBytes($manifestJson)
+    $out = [IO.File]::Create($BuiltIn)
+    try {
+        $gzip = New-Object IO.Compression.GZipStream($out, [IO.Compression.CompressionLevel]::Optimal)
+        $gzip.Write($bytes, 0, $bytes.Length)
+        $gzip.Dispose()
+    } finally { $out.Dispose() }
+    Write-Host ("Launcher's built-in list: {0} ({1:N1} MB); rebuild the launcher to include it" -f $BuiltIn, ((Get-Item $BuiltIn).Length / 1MB))
+}
 
 $csvRows = foreach ($r in $rows.Values) { $r | Select-Object -Property $Columns }
 $csvText = if ($csvRows) { ($csvRows | ConvertTo-Csv -NoTypeInformation) -join "`r`n" } else { ($Columns | ForEach-Object { "`"$_`"" }) -join ',' }
@@ -192,6 +227,7 @@ $csvText = if ($csvRows) { ($csvRows | ConvertTo-Csv -NoTypeInformation) -join "
 
 Write-Host ("manifest.json: {0} games ({1} matsuri, {2} thread)" -f $games.Count,
     @($games | Where-Object { $_.source -eq 'matsuri' }).Count, @($games | Where-Object { $_.source -eq 'thread' }).Count)
+if ($withheldCount) { Write-Host ("withheld (kept in the bucket, not listed): {0} games under {1}" -f $withheldCount, ($Withheld -join ', ')) }
 if ($added) { Write-Host "games.csv: added $added new rows to check" }
 foreach ($w in $warnings) { Write-Host "warning: $w" -ForegroundColor Yellow }
 foreach ($p in $problems) { Write-Host "problem: $p" -ForegroundColor Red }

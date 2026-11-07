@@ -239,6 +239,7 @@ internal sealed class MainWindow : Window
         base.OnOpened(e);
         NativeMethods.StyleTitleBar(this);
         RememberNormalBounds();
+        Diagnostics.WatchUiThread();
         Look.PixelScale = RenderScaling;
         ScalingChanged += (_, _) => Look.PixelScale = RenderScaling;
         // Runtimes copied into game folders by a launcher that closed before its games did.
@@ -272,13 +273,36 @@ internal sealed class MainWindow : Window
         var deadline = DateTime.UtcNow.AddSeconds(_vip is null ? 20 : 240);
         while ((MetadataLookupsRunning || _vip?.Busy == true) && DateTime.UtcNow < deadline)
             await Task.Delay(150);
-        // Keys to press first, to capture a menu or window: RPGLAUNCHER_SCREENSHOT_KEYS=Right,Down,Enter.
-        foreach (string name in (Environment.GetEnvironmentVariable("RPGLAUNCHER_SCREENSHOT_KEYS") ?? "")
+        // Keys to press first, to capture a menu or window: RPGLAUNCHER_SCREENSHOT_KEYS=Right,Down,Enter. A step
+        // Click:0.3:0.2 or RightClick:0.3:0.2 clicks that point instead, given as fractions of the window's width and
+        // height; Ctrl+ and Shift+ before a key or a click hold those down (Shift+Down, Ctrl+Click:0.3:0.2); Wait:5 pauses.
+        foreach (string step in (Environment.GetEnvironmentVariable("RPGLAUNCHER_SCREENSHOT_KEYS") ?? "")
                      .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
+            string name = step;
+            var modifiers = KeyModifiers.None;
+            while (name.IndexOf('+') is > 0 and var plus && name[..plus] is var held &&
+                   (held.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) || held.Equals("Shift", StringComparison.OrdinalIgnoreCase)))
+            {
+                modifiers |= held.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) ? KeyModifiers.Control : KeyModifiers.Shift;
+                name = name[(plus + 1)..];
+            }
+            if (name.StartsWith("Click:", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RightClick:", StringComparison.OrdinalIgnoreCase))
+            {
+                ClickAt(name, modifiers);
+                await Task.Delay(120);
+                continue;
+            }
+            // Wait:20 waits that many seconds, for a download or scan to get going or finish.
+            if (name.StartsWith("Wait:", StringComparison.OrdinalIgnoreCase) && double.TryParse(name[5..],
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double seconds))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(seconds));
+                continue;
+            }
             if (!Enum.TryParse<Key>(name, ignoreCase: true, out var key)) continue;
             var target = FocusManager?.GetFocusedElement() as Control ?? this;
-            target.RaiseEvent(new KeyEventArgs { RoutedEvent = KeyDownEvent, Key = key, Source = target });
+            target.RaiseEvent(new KeyEventArgs { RoutedEvent = KeyDownEvent, Key = key, KeyModifiers = modifiers, Source = target });
             await Task.Delay(120);
         }
         await Task.Delay(700);
@@ -296,6 +320,24 @@ internal sealed class MainWindow : Window
             // screenshot mode is a development aid only
         }
         Close();
+    }
+
+    /// <summary>Screenshot mode's "Click:fx:fy" and "RightClick:fx:fy" steps: a button press at that point of the window.</summary>
+    private void ClickAt(string step, KeyModifiers modifiers)
+    {
+        var parts = step.Split(':');
+        if (parts.Length != 3 ||
+            !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double fx) ||
+            !double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double fy))
+            return;
+        var at = new Point(Bounds.Width * fx, Bounds.Height * fy);
+        if (this.InputHitTest(at) is not Interactive target) return;
+        bool right = parts[0].Equals("RightClick", StringComparison.OrdinalIgnoreCase);
+        var properties = right
+            ? new PointerPointProperties(RawInputModifiers.RightMouseButton, PointerUpdateKind.RightButtonPressed)
+            : new PointerPointProperties(RawInputModifiers.LeftMouseButton, PointerUpdateKind.LeftButtonPressed);
+        target.RaiseEvent(new PointerPressedEventArgs(target, new Avalonia.Input.Pointer(Avalonia.Input.Pointer.GetNextFreeId(), PointerType.Mouse, true), this, at,
+            (ulong)Environment.TickCount64, properties, modifiers));
     }
 
     private static readonly PixelSize LargeScreen = new(2560, 1440);
@@ -2806,7 +2848,7 @@ internal sealed class MainWindow : Window
             _vip.ModeRequested += SetMode;
         }
         Content = _vip.Host;
-        Title = "VIPRPG ランチャー — RPG Launcher";
+        Title = "RPG Launcher";
         _vip.Start();
     }
 

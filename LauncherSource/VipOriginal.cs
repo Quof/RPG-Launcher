@@ -18,8 +18,9 @@ internal sealed class PasswordRequiredException(bool wrong) : Exception(wrong ? 
 internal static class VipOriginal
 {
     private static readonly Regex CsrfRegex = new("name=\"csrf_token\" value=\"([^\"]+)\"", RegexOptions.Compiled);
-    private static readonly Regex UploadRegex = new(@"data-upload_id=""([0-9]+)""", RegexOptions.Compiled);
-    private static readonly Regex UploadNameRegex = new(@"class=""name"" title=""([^""]*)""", RegexOptions.Compiled);
+    // Each upload's id and the file name shown under it (<strong title="…" class="name">), read together.
+    private static readonly Regex UploadRegex = new(@"data-upload_id=""([0-9]+)"".*?<strong[^>]*\btitle=""([^""]*)""",
+        RegexOptions.Compiled | RegexOptions.Singleline);
     private static readonly Regex DriveIdRegex = new(@"(?:[?&]id=|/d/)([A-Za-z0-9_\-]{20,})", RegexOptions.Compiled);
     private static readonly Regex WaybackRegex = new(@"^https?://web\.archive\.org/web/([0-9]+)(?:[a-z_]*)/(.+)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex UploaderPageRegex = new(@"^/[^/]+/download/[0-9]+(?:/[^/]*)?/?$", RegexOptions.Compiled);
@@ -137,13 +138,17 @@ internal static class VipOriginal
         string csrf = CsrfRegex.Match(html) is { Success: true } m ? m.Groups[1].Value
             : throw new InvalidDataException("The itch.io page has no download token.");
 
-        // Uploads in page order, with their names; a Windows build or archive is preferred.
-        var uploads = UploadRegex.Matches(html).Select(x => x.Groups[1].Value).Distinct().ToList();
-        if (uploads.Count == 0) throw new NotSupportedException("This itch.io page has no files to download.");
-        var names = UploadNameRegex.Matches(html).Select(x => WebUtility.HtmlDecode(x.Groups[1].Value)).ToList();
+        // Uploads in page order, with their names; a Windows build or archive is preferred, and pictures (a page often
+        // offers its icon too) come last.
+        var found = UploadRegex.Matches(html).Select(x => (Id: x.Groups[1].Value, Name: WebUtility.HtmlDecode(x.Groups[2].Value)))
+            .DistinctBy(x => x.Id).ToList();
+        if (found.Count == 0) throw new NotSupportedException("This itch.io page has no files to download.");
+        var uploads = found.Select(x => x.Id).ToList();
+        var names = found.Select(x => x.Name).ToList();
         int Rank(int i)
         {
-            string name = i < names.Count ? names[i].ToLowerInvariant() : "";
+            string name = names[i].ToLowerInvariant();
+            if (new[] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico" }.Any(name.EndsWith)) return 4;
             if (name.Contains("mac") || name.Contains("linux") || name.Contains("android") || name.EndsWith(".apk")) return 3;
             if (name.Contains("win") || ArchiveExtensions.Any(name.EndsWith)) return 0;
             return 1;
@@ -162,7 +167,7 @@ internal static class VipOriginal
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
         string direct = json.RootElement.TryGetProperty("url", out var link) && link.GetString() is { } value
             ? value : throw new InvalidDataException("itch.io didn't give a download link" + ItchError(json.RootElement));
-        return (direct, best < names.Count ? names[best] : null);
+        return (direct, names[best]);
     }
 
     /// <summary>itch.io's own reason ("errors": […]), as ": reason", or ".".</summary>

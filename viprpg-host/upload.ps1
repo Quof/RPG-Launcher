@@ -19,7 +19,9 @@ param(
     # Also remove files from R2 that are no longer in the bucket folder.
     [switch]$Delete,
     # Show what would be uploaded without sending anything.
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Don't publish the index website afterwards (deploy-site.ps1).
+    [switch]$NoSite
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,3 +51,9 @@ rclone copyto (Join-Path $Bucket 'manifest.json') "$Remote/manifest.json" @commo
 if ($LASTEXITCODE) { throw "rclone copyto manifest.json failed ($LASTEXITCODE)" }
 
 Write-Host $(if ($DryRun) { 'Dry run done; nothing was sent.' } else { 'Uploaded.' })
+
+# The index website serves the launcher's list, so it goes up after the zips it lists are in R2.
+if (-not $DryRun -and -not $NoSite) {
+    $ErrorActionPreference = 'Stop'
+    & (Join-Path $PSScriptRoot 'deploy-site.ps1') -Bucket $Bucket
+}

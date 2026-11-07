@@ -1,0 +1,13 @@
+# The index website: static files only (no script), which Cloudflare serves free and without request limits.
+# Build it with build-site.py into ../site-out, then deploy with deploy-site.ps1.
+name = "viprpg-index"
+compatibility_date = "2025-06-01"
+workers_dev = false
+routes = [
+  { pattern = "viprpg-archive.com", custom_domain = true },
+  { pattern = "www.viprpg-archive.com", custom_domain = true },
+]
+
+[assets]
+directory = "../site-out"
+not_found_handling = "404-page"

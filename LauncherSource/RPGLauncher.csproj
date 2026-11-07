@@ -35,7 +35,10 @@
     <EmbeddedResource Include="app.ico" LogicalName="RpgLauncher.app.ico" />
     <EmbeddedResource Include="Assets\*.png" LogicalName="RpgLauncher.Assets.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets\*.json" LogicalName="RpgLauncher.Assets.%(Filename)%(Extension)" />
-    <EmbeddedResource Include="Assets\vip-thumbs.zip" LogicalName="RpgLauncher.Assets.vip-thumbs.zip" />
+    <!-- The work pictures, in parts under 100 MB each so they fit in a GitHub repository. -->
+    <EmbeddedResource Include="Assets\vip-thumbs-*.zip" LogicalName="RpgLauncher.Assets.%(Filename)%(Extension)" />
+    <!-- The download server's list as of the last build-manifest.ps1 run, so the lists show before the server answers. -->
+    <EmbeddedResource Include="Assets\vip-server.json.gz" LogicalName="RpgLauncher.Assets.vip-server.json.gz" Condition="Exists('Assets\vip-server.json.gz')" />
   </ItemGroup>
 
 </Project>
