@@ -121,6 +121,7 @@ def page(title, body, depth=0, description="", extra_head="", root=None):
     <a href="{up}index.html">{bi("祭り", "Festivals")}</a>
     <a href="{up}storage.html">{bi("保管庫", "Storage")}</a>
     <a href="{up}search.html">{bi("検索", "Search")}</a>
+    <a href="{up}missing.html">{bi("未所持", "Missing")}</a>
     <a href="{up}about.html">{bi("サイトについて", "About")}</a>
     <button class="lang" type="button" onclick="setLang()" aria-label="Language">{bi("English", "日本語")}</button>
   </nav>
@@ -133,7 +134,10 @@ def page(title, body, depth=0, description="", extra_head="", root=None):
           "Downloads are limited to 500 files per IP address a day. Every work belongs to its author.")}</p>
 </footer>
 <script>
-function setLang(){{var d=document.documentElement;d.dataset.lang=d.dataset.lang==="en"?"ja":"en";try{{localStorage.setItem("lang",d.dataset.lang);}}catch(e){{}}}}
+function setLang(){{var d=document.documentElement;d.dataset.lang=d.dataset.lang==="en"?"ja":"en";try{{localStorage.setItem("lang",d.dataset.lang);}}catch(e){{}}applyPh();}}
+// Search boxes show their hint in the page's language only, so it fits even on a phone.
+function applyPh(){{var en=document.documentElement.dataset.lang==="en";document.querySelectorAll("[data-ph-ja]").forEach(function(i){{i.placeholder=en?i.dataset.phEn:i.dataset.phJa;}});}}
+applyPh();
 </script>
 </body>
 </html>
@@ -198,11 +202,15 @@ h1{font-size:30px;margin:6px 0 4px} h2{font-size:22px;margin:28px 0 10px;color:v
 .work.lost .pic,.work.eternal .pic{opacity:.55}
 .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0 0}
 input[type=search]{font:inherit;color:var(--ink);background:#081440;border:2px solid #6f8fe0;border-radius:4px;padding:6px 10px;min-width:0;width:min(420px,100%)}
+/* The front page's search sits in a form, which would otherwise shrink the box to the browser's default size. */
+.toolbar form{flex:1 1 auto;max-width:560px}
+.toolbar form input[type=search]{width:100%}
 input[type=search]:focus{outline:none;border-color:var(--accent)}
 table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #2c4aa0;vertical-align:top}
 th{font-family:"DotGothic16",monospace;font-weight:400;color:var(--accent);position:sticky;top:64px;background:#0f2257;white-space:nowrap}
 td.t{overflow-wrap:anywhere} td.a{width:24%;min-width:7em;overflow-wrap:anywhere} td.s{white-space:nowrap;color:var(--dim)} td.d{white-space:nowrap}
+tr.fh th{position:static;background:#13235e;padding-top:14px;white-space:normal;font-size:16px}
 tr:target td{background:rgba(255,216,74,.15)}
 .areas{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .area{padding:10px 12px;background:var(--card);border:2px solid #34539f;border-radius:6px;color:var(--ink)}
@@ -215,6 +223,8 @@ tr:target td{background:rgba(255,216,74,.15)}
 .about{max-width:820px;margin:0 auto}
 .about p{margin:0 0 14px;line-height:1.85}
 .about .callout{background:#0d1d4d;border:2px solid var(--accent);border-radius:4px;padding:10px 14px;color:#fff3c4}
+.about .callout.warn{border-color:var(--bad);color:#ffd9d9;background:#2a1430}
+.about .callout.warn strong{color:var(--bad);margin-right:6px}
 .about .contact{margin-top:18px;font-family:"DotGothic16",monospace;color:var(--dim)}
 @media (max-width:600px){
   .brand{font-size:20px} h1{font-size:24px} .works{grid-template-columns:1fr 1fr;gap:8px}
@@ -224,18 +234,30 @@ tr:target td{background:rgba(255,216,74,.15)}
 """
 
 CONTACT = "dekirutranslations@gmail.com"
+# Festivals left off the missing page: the 2014 素材祭り collected art assets, not games.
+NOT_LISTED_MISSING = {"2014-tsukusure-festival"}
+# Games that were only ever playable in a browser (RPGアツマール, or itch.io pages with only a "play in browser"
+# frame and no download, checked 2026-11-08), so there is no file to be missing. Left off the missing page.
+BROWSER_ONLY = {("2026-toppatsu-festival", "8"), ("2026-gw", "11"), ("2025-gw", "21"), ("2025-gw", "22"), ("2023-winter", "30")}
+
+
+def browser_only(w):
+    return ((w["matsuri"], (w.get("no") or "").lstrip("0")) in BROWSER_ONLY
+            or any("game.nicovideo.jp/atsumaru" in d for d in (w.get("downloads") or [])))
 
 ABOUT = f"""<section class="window about">
 <h1>{bi("このサイトについて", "About")}</h1>
 
 <div class="ja">
-<p class="callout">このサイトに掲載されていないVIPRPGをお持ちの方は、ぜひお送りいただけますと大変助かります。アップロードしてアーカイブに追加いたします。</p>
+<p class="callout">このサイトに掲載されていないVIPRPG（<a href="missing.html">未所持の作品の一覧</a>）をお持ちの方は、ぜひお送りいただけますと大変助かります。アップロードしてアーカイブに追加いたします。</p>
+
+<p class="callout warn"><strong>【R-18】</strong>このアーカイブには、成人向け（R-18）やグロテスクな表現（R-18G）を含む作品があります。すべての作品にその表示があるわけではありません。</p>
 
 <p>このサイトは、すべてのVIPRPGをひとつのサイトに集めることを目指したものです。作品がそれぞれ別々の不安定なサイトに置かれているために、時が経つにつれて失われていくことを少しでも防ぐのが目的です。ファイルはすべて、私が個人で費用を負担しているCloudflareのサーバーに保存しています。現時点ではサーバー代は問題になっておらず、万一必要になった場合でも、コミュニティの皆さまのご協力で十分にまかなえる程度の金額です。</p>
 
-<p>このサイトの裏側は、私が開発した「RPG Launcher」とつながっています。もしもローダーのようなプログラムに作品を直接ダウンロードできるもので、こちらのほうがずっと便利ですが、このサイトから直接ダウンロードしていただくこともできます。ダウンロードには、お一人につき1日500件までの制限と、サイト全体で月1,000万件までの上限があります（それを超えると、新しいダウンロードに追加の費用がかかるためです）。</p>
+<p>このサイトの裏側は、私が開発した「RPG Launcher」とつながっています。もしもローダーのようなプログラムに作品を直接ダウンロードできるもので、こちらのほうがずっと便利ですが、このサイトから直接ダウンロードしていただくこともできます。ダウンロードには、お一人につき1日500件までの制限と、サイト全体で1日あたり約10万件までの上限があります（運営費を低く抑えるための上限です）。上限に達した場合は、翌日の日本時間午前9時から再びダウンロードできるようになります。</p>
 
-<p>現在掲載しているファイルは、数週間かけてarchive.orgを調べ、ダウンロードできるものを集めた、できる限りのものです。ただ、アメリカからでは地域制限で見られないサイトがいくつもあったことや、多くのリンクがすでに失われていたことから、すべてを集めることはできませんでした。改めてのお願いになりますが、このサイトにないVIPRPGをお持ちの方は、ぜひお送りください。アップロードしてアーカイブに追加いたします。</p>
+<p>現在掲載しているファイルは、数週間かけてarchive.orgを調べ、ダウンロードできるものを集めた、できる限りのものです。ただ、アメリカからでは地域制限で見られないサイトがいくつもあったことや、多くのリンクがすでに失われていたことから、すべてを集めることはできませんでした。改めてのお願いになりますが、このサイトにないVIPRPGをお持ちの方は（<a href="missing.html">未所持の作品の一覧</a>）、ぜひお送りください。アップロードしてアーカイブに追加いたします。</p>
 
 <p>作者の方で、ご自身の作品をこのアーカイブから<strong>削除</strong>してほしい場合は、<a href="mailto:{CONTACT}">こちら</a>までご連絡ください。他人になりすまして作品を削除させようとする方もいるかもしれませんので、ご本人であることを確認できるものをご用意いただけますと幸いです。</p>
 
@@ -243,13 +265,15 @@ ABOUT = f"""<section class="window about">
 </div>
 
 <div class="en">
-<p class="callout"><em>If you have a VIPRPG not on this website, it would be of great help to send it to me so it can be uploaded and added to the archive!</em></p>
+<p class="callout"><em>If you have a VIPRPG not on this website (see the <a href="missing.html">list of missing games</a>), it would be of great help to send it to me so it can be uploaded and added to the archive!</em></p>
+
+<p class="callout warn"><strong>18+</strong> Some games in this archive contain adult (R-18) or graphic, grotesque (R-18G) content, and not every one of them is labelled as such.</p>
 
 <p>This website is an attempt to gather all VIPRPGs onto a single website in order to better combat games being lost over time due to being hosted on separate, unstable websites. These files are all hosted on a Cloudflare server that I'm paying for out of pocket; right now hosting fees are not a concern, and they're low enough that should the time come the community would easily be able to help pay for them.</p>
 
-<p>The backend of this website is linked to an RPG Launcher I've developed that allows you to download the games directly into a Moshimo Loader-esque program, which is the significantly more convenient option, but this website is also available for direct downloading. There is a rate limit of 500 downloads per user per day, and a hard limit of 10,000,000 downloads overall per month (because that's when I need to start paying extra for new downloads).</p>
+<p>The backend of this website is linked to an RPG Launcher I've developed that allows you to download the games directly into a Moshimo Loader-esque program, which is the significantly more convenient option, but this website is also available for direct downloading. There is a rate limit of 500 downloads per user per day, and a cap of about 100,000 downloads per day across everyone (that's what keeps the fees low). If the daily cap is ever reached, downloads open again at midnight UTC.</p>
 
-<p>The files on the website now are the best I could gather after weeks of effort digging through archive.org and downloading what I can, but my efforts were stymied by being region-blocked in America from various websites, and by the fact that several links have, in the time since, been lost. As stated previously, if you have a VIPRPG not on this website, it would be of great help to send it to me so it can be uploaded and added to the archive.</p>
+<p>The files on the website now are the best I could gather after weeks of effort digging through archive.org and downloading what I can, but my efforts were stymied by being region-blocked in America from various websites, and by the fact that several links have, in the time since, been lost. As stated previously, if you have a VIPRPG not on this website (see the <a href="missing.html">list of missing games</a>), it would be of great help to send it to me so it can be uploaded and added to the archive.</p>
 
 <p>If you are a developer and would like your game <strong>REMOVED</strong> from this archive, please contact me <a href="mailto:{CONTACT}">here</a>. Please also be ready to provide some manner of proof of identity, because there may be bad actors pretending to be others just to get their game taken down.</p>
 
@@ -325,6 +349,7 @@ def main():
         works_by[w["matsuri"]].append(w)
 
     search = []
+    missing = defaultdict(list)  # festival id -> rows for missing.html
     fest_cards = defaultdict(list)
     total_hosted = 0
     for m in fests:
@@ -370,6 +395,11 @@ def main():
   </div>
 </article>""")
             search.append([w["title"], w.get("author") or "", short_name(m["name"]), f"m/{m['id']}.html#{anchor}", 1 if g else 0])
+            if not g and not eternal and m["id"] not in NOT_LISTED_MISSING and not browser_only(w):
+                src = f' <a class="btn" href="{esc(source)}" rel="nofollow noopener">{bi("元のリンク", "Old link")}</a>' if source else ""
+                missing[m["id"]].append(f'<tr><td class="s">{esc(w.get("no") or "—")}</td>'
+                                        f'<td class="t"><a href="m/{esc(m["id"])}.html#{anchor}">{esc(w["title"])}</a></td>'
+                                        f'<td class="a hide-sm">{esc(w.get("author"))}</td><td class="d">{src}</td></tr>')
         total_hosted += hosted
         flinks = []
         for label, url in ((bi("祭りwiki", "Wiki"), m.get("wikiUrl")), (bi("公式サイト", "Site"), m.get("siteUrl")),
@@ -383,7 +413,7 @@ def main():
   {f'<p class="lede">{esc(m["period"])}</p>' if m.get('period') else ''}
   <div class="stats"><div class="stat"><b>{len(works)}</b>{bi("作品", "works")}</div><div class="stat"><b>{hosted}</b>{bi("ダウンロード可", "downloadable")}</div></div>
   <div class="links">{''.join(flinks)}</div>
-  <div class="toolbar"><input type="search" placeholder="この祭りから探す / Filter" oninput="filterWorks(this.value)"></div>
+  <div class="toolbar"><input type="search" data-ph-ja="この祭りから探す" data-ph-en="Filter this festival" placeholder="この祭りから探す" oninput="filterWorks(this.value)"></div>
 </section>
 <div class="works" id="works">
 {''.join(cards)}
@@ -431,7 +461,7 @@ function filterWorks(q){{q=q.trim().toLowerCase();for(const el of document.query
   <p class="lede"><a href="../storage.html">{bi("保管庫", "Storage")}</a></p>
   <h1>{esc(label)}</h1>
   <div class="stats"><div class="stat"><b>{len(rows)}</b>{bi("ファイル", "files")}</div></div>
-  <div class="toolbar"><input type="search" placeholder="この保管庫から探す / Filter" oninput="filterRows(this.value)"></div>
+  <div class="toolbar"><input type="search" data-ph-ja="この保管庫から探す" data-ph-en="Filter this storage archive" placeholder="この保管庫から探す" oninput="filterRows(this.value)"></div>
 </section>
 <table id="rows"><thead><tr><th>{bi("タイトル", "Title")}</th>{f'<th class="hide-sm">{bi("作者", "Author")}</th>' if has_author else ""}<th>{bi("サイズ", "Size")}</th><th></th></tr></thead>
 <tbody>
@@ -466,7 +496,7 @@ function filterRows(q){{q=q.trim().toLowerCase();for(const tr of document.queryS
     <div class="stat"><b>{total_hosted:,}</b>{bi("祭り作品", "festival works")}</div>
     <div class="stat"><b>{sum(len(v) for v in areas.values()):,}</b>{bi("保管庫のファイル", "storage files")}</div>
   </div>
-  <div class="toolbar"><form action="search.html"><input type="search" name="q" placeholder="作品名・作者で検索 / Search titles and authors"></form></div>
+  <div class="toolbar"><form action="search.html"><input type="search" name="q" data-ph-ja="作品名・作者で検索" data-ph-en="Search titles and authors" placeholder="作品名・作者で検索"></form></div>
 </section>
 {years}"""
     with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
@@ -476,7 +506,7 @@ function filterRows(q){{q=q.trim().toLowerCase();for(const tr of document.queryS
         json.dump(search, f, ensure_ascii=False, separators=(",", ":"))
     search_body = f"""<section class="window">
   <h1>{bi("検索", "Search")}</h1>
-  <div class="toolbar"><input type="search" id="q" placeholder="作品名・作者 / Title or author" autofocus></div>
+  <div class="toolbar"><input type="search" id="q" data-ph-ja="作品名・作者で検索" data-ph-en="Search titles and authors" placeholder="作品名・作者で検索" autofocus></div>
   <p class="lede" id="count"></p>
 </section>
 <ul class="results" id="results"></ul>
@@ -499,6 +529,32 @@ q.addEventListener('input',run);load();
 </script>"""
     with open(os.path.join(out, "search.html"), "w", encoding="utf-8") as f:
         f.write(page("検索 — VIPRPG アーカイブ", search_body))
+
+    # Every festival entry the archive doesn't have yet (never-submitted entries aren't missing).
+    total_missing = sum(len(v) for v in missing.values())
+    groups = "".join(
+        f'<tbody class="grp"><tr class="fh"><th colspan="4"><a href="m/{esc(m["id"])}.html">{esc(m["name"])}</a>'
+        f' <span class="muted">{len(missing[m["id"]])}</span></th></tr>{"".join(missing[m["id"]])}</tbody>'
+        for m in fests if missing.get(m["id"]))
+    missing_body = f"""<section class="window">
+  <h1>{bi("未所持の作品", "Missing games")}</h1>
+  <p class="lede">{bi("祭りの作品一覧にありながら、このアーカイブがまだ持っていない作品です（未提出のエターナル作品は含みません）。お持ちの方は、ぜひ "
+                       f'<a href="mailto:{CONTACT}">{CONTACT}</a> までお送りください。アップロードしてアーカイブに追加いたします。',
+                       "Festival entries this archive doesn't have yet (entries that were never submitted aren't included). "
+                       f'If you have any of them, please send them to <a href="mailto:{CONTACT}">{CONTACT}</a> so they can be added to the archive.')}</p>
+  <div class="stats"><div class="stat"><b>{total_missing}</b>{bi("作品", "games")}</div><div class="stat"><b>{len(missing)}</b>{bi("祭り", "festivals")}</div></div>
+  <div class="toolbar"><input type="search" data-ph-ja="未所持の作品から探す" data-ph-en="Filter the missing games" placeholder="未所持の作品から探す" oninput="filterMissing(this.value)"></div>
+</section>
+<table id="missing"><thead><tr><th>No.</th><th>{bi("タイトル", "Title")}</th><th class="hide-sm">{bi("作者", "Author")}</th><th></th></tr></thead>
+{groups}
+</table>
+<script>
+function filterMissing(q){{q=q.trim().toLowerCase();for(const g of document.querySelectorAll('#missing tbody.grp')){{let any=false;
+for(const tr of g.querySelectorAll('tr:not(.fh)')){{const hit=!q||tr.textContent.toLowerCase().includes(q)||g.querySelector('.fh').textContent.toLowerCase().includes(q);tr.style.display=hit?'':'none';any=any||hit;}}
+g.style.display=any?'':'none';}}}}
+</script>"""
+    with open(os.path.join(out, "missing.html"), "w", encoding="utf-8") as f:
+        f.write(page("未所持の作品 — VIPRPG アーカイブ", missing_body, description=f"VIPRPGアーカイブがまだ持っていない祭り作品 {total_missing}本。"))
 
     with open(os.path.join(out, "about.html"), "w", encoding="utf-8") as f:
         f.write(page("サイトについて — VIPRPG アーカイブ", ABOUT, description="VIPRPGアーカイブについて。"))

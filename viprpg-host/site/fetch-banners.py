@@ -24,7 +24,17 @@ EXTRA = {
     "2011-toppatsu-festival": ["/original-pages/2011-toppatsu-festival/assets/001.png"],
     "2009-summer": ["/original-pages/2009-summer/tk_m399.png", "/original-pages/2009-summer/tk_m400.png"],
     "2008-gw": ["/original-pages/2008-gw/image/gw.png"],
+    # The rest are the link banners shown on rocky75's VIPRPG review pages (VIPRPG祭りの感想).
+    "2008-chuuni-festival": ["http://rocky75.web.fc2.com/vip/cn08/ba.png"],
+    "2008-jisaku-battle-festival": ["http://rocky75.web.fc2.com/vip/js08/dl.png"],
+    "2008-kouhaku": ["http://rocky75.web.fc2.com/vip/pic/kh08.png"],
+    "2009-ksgfestival": ["http://rocky75.web.fc2.com/vip/ks09/vo01_0477.png"],
+    "2009-gw": ["http://rocky75.web.fc2.com/vip/gw09/gw2009b.png"],
+    "wiki-kouhaku2007": ["http://rocky75.web.fc2.com/vip/kh07/kouhaku2007.png"],
 }
+
+# Festivals whose banner files were supplied by hand, with no address to fetch them from.
+LOCAL = ["2008-seiyoku-festival"]
 
 
 def get(url):
@@ -46,6 +56,9 @@ def main():
             found[festival].append(src)
     for festival, srcs in EXTRA.items():
         found.setdefault(festival, srcs)
+    # Banners supplied by hand (saved straight into banners/<festival>/) are kept as they are.
+    for festival in LOCAL:
+        found.setdefault(festival, sorted(os.listdir(os.path.join(OUT, festival))))
 
     index = {}
     for festival, srcs in sorted(found.items()):

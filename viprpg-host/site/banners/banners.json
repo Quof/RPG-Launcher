@@ -22,15 +22,33 @@
  "2007-summer": [
   "2007-summer/1.png"
  ],
+ "2008-chuuni-festival": [
+  "2008-chuuni-festival/1.png"
+ ],
  "2008-gw": [
   "2008-gw/1.png"
+ ],
+ "2008-jisaku-battle-festival": [
+  "2008-jisaku-battle-festival/1.png"
+ ],
+ "2008-kouhaku": [
+  "2008-kouhaku/1.png"
+ ],
+ "2008-seiyoku-festival": [
+  "2008-seiyoku-festival/1.png"
  ],
  "2008-summer": [
   "2008-summer/1.png"
  ],
+ "2009-gw": [
+  "2009-gw/1.png"
+ ],
  "2009-kouhaku": [
   "2009-kouhaku/1.png",
   "2009-kouhaku/2.png"
+ ],
+ "2009-ksgfestival": [
+  "2009-ksgfestival/1.png"
  ],
  "2009-summer": [
   "2009-summer/1.png",
@@ -260,5 +278,8 @@
  ],
  "2026-toppatsu-festival": [
   "2026-toppatsu-festival/1.png"
+ ],
+ "wiki-kouhaku2007": [
+  "wiki-kouhaku2007/1.png"
  ]
 }
